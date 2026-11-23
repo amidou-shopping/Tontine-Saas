@@ -1,0 +1,281 @@
+// ============================================================================
+// schema.prisma — SaaS de gestion de tontines sénégalaises
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// ENUMS
+// ----------------------------------------------------------------------------
+
+enum Role {
+  SUPER_ADMIN    // Administrateur de la plateforme SaaS
+  ADMIN_TONTINE  // Créateur / gestionnaire d'une tontine spécifique
+  MEMBER         // Participant simple
+}
+
+enum TontineType {
+  CLASSIQUE        // Rotation simple : chaque membre reçoit la cagnotte à tour de rôle
+  INVESTISSEMENT   // Cagnotte destinée à un projet commun (pas de rotation individuelle)
+}
+
+enum TontineFrequency {
+  QUOTIDIENNE
+  HEBDOMADAIRE
+  MENSUELLE
+}
+
+enum TontineStatus {
+  EN_ATTENTE   // Créée mais pas encore démarrée (en cours de recrutement)
+  ACTIVE
+  SUSPENDUE
+  TERMINEE
+}
+
+enum MemberStatus {
+  ACTIF
+  EN_RETARD     // A des cotisations impayées
+  EXCLU
+  SORTIE        // A déjà reçu son tour et la tontine continue pour les autres
+}
+
+enum TransactionType {
+  COTISATION          // Paiement d'un membre vers la cagnotte
+  VERSEMENT_GAGNANT    // Versement de la cagnotte nette au bénéficiaire du tour
+  COMMISSION           // Commission SaaS prélevée sur une cotisation
+  ABONNEMENT           // Paiement d'un abonnement SaaS par un ADMIN_TONTINE
+  REMBOURSEMENT
+}
+
+enum TransactionStatus {
+  EN_ATTENTE
+  REUSSIE
+  ECHOUEE
+  ANNULEE
+}
+
+enum PaymentProvider {
+  WAVE
+  ORANGE_MONEY
+  PAYTECH
+  PAYDUNYA
+  ESPECES
+  VIREMENT
+}
+
+enum PlanAbonnement {
+  GRATUIT     // Limité en nombre de tontines / membres
+  STANDARD
+  PREMIUM
+}
+
+// ----------------------------------------------------------------------------
+// UTILISATEURS
+// ----------------------------------------------------------------------------
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  telephone     String   @unique // Format E.164, ex: +221771234567
+  passwordHash  String
+  nom           String
+  prenom        String
+  role          Role     @default(MEMBER)
+  isBlocked     Boolean  @default(false) // Action du Super-Admin (back-office)
+  isVerified    Boolean  @default(false) // Vérification OTP téléphone
+  avatarUrl     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  tontinesCreees     Tontine[]        @relation("TontineCreateur")
+  participations     TontineMember[]
+  transactions       Transaction[]
+  abonnement         Subscription?
+  pendingPayments    PendingPayment[]
+  notifications      Notification[]
+
+  @@index([role])
+  @@map("users")
+}
+
+// ----------------------------------------------------------------------------
+// ABONNEMENT SAAS (Monétisation B2B — ADMIN_TONTINE paie pour gérer ses tontines)
+// ----------------------------------------------------------------------------
+
+model Subscription {
+  id            String         @id @default(cuid())
+  userId        String         @unique
+  user          User           @relation(fields: [userId], references: [id])
+  plan          PlanAbonnement @default(GRATUIT)
+  prixMensuel   Decimal        @db.Decimal(12, 2) @default(0)
+  dateDebut     DateTime       @default(now())
+  dateFin       DateTime?
+  actif         Boolean        @default(true)
+
+  @@map("subscriptions")
+}
+
+// ----------------------------------------------------------------------------
+// TONTINES
+// ----------------------------------------------------------------------------
+
+model Tontine {
+  id                String            @id @default(cuid())
+  nom               String
+  description       String?
+  type              TontineType       @default(CLASSIQUE)
+  montantCotisation Decimal           @db.Decimal(12, 2) // Montant fixe par cycle et par membre
+  frequence         TontineFrequency  @default(MENSUELLE)
+  tauxCommission    Decimal           @db.Decimal(5, 4)  @default(0.015) // 1.5% par défaut, override possible par tontine
+  nombreMaxMembres  Int
+  statut            TontineStatus     @default(EN_ATTENTE)
+  dateDebut         DateTime?
+  cycleActuel       Int               @default(1) // Index du tour en cours
+  codeInvitation    String            @unique // Code unique pour rejoindre via lien
+
+  createurId        String
+  createur           User             @relation("TontineCreateur", fields: [createurId], references: [id])
+
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  membres            TontineMember[]
+  transactions       Transaction[]
+  pendingPayments    PendingPayment[]
+
+  @@index([statut])
+  @@map("tontines")
+}
+
+// ----------------------------------------------------------------------------
+// PARTICIPATIONS (table de jointure enrichie User <-> Tontine)
+// ----------------------------------------------------------------------------
+
+model TontineMember {
+  id             String       @id @default(cuid())
+  tontineId      String
+  tontine        Tontine      @relation(fields: [tontineId], references: [id])
+  userId         String
+  user           User         @relation(fields: [userId], references: [id])
+
+  ordrePassage   Int          // Rang du membre dans la rotation (1, 2, 3...)
+  statut         MemberStatus @default(ACTIF)
+  aDejaRecu      Boolean      @default(false) // A déjà touché la cagnotte de son tour
+  dateReception  DateTime?    // Date à laquelle il/elle a reçu sa cagnotte
+
+  joinedAt       DateTime     @default(now())
+
+  transactions   Transaction[]
+  pendingPayments PendingPayment[]
+
+  @@unique([tontineId, userId])       // Un membre ne peut rejoindre qu'une fois la même tontine
+  @@unique([tontineId, ordrePassage]) // Un seul membre par rang dans une tontine donnée
+  @@map("tontine_members")
+}
+
+// ----------------------------------------------------------------------------
+// TRANSACTIONS (cœur de la traçabilité financière + monétisation)
+// ----------------------------------------------------------------------------
+
+model Transaction {
+  id                String             @id @default(cuid())
+
+  type              TransactionType
+  statut            TransactionStatus  @default(EN_ATTENTE)
+  provider          PaymentProvider?
+  referenceExterne  String?            // ID de transaction retourné par Wave/Orange Money/PayTech
+
+  montantBrut       Decimal            @db.Decimal(12, 2) // Montant total avant commission
+  montantCommission Decimal            @db.Decimal(12, 2) @default(0) // Part prélevée par le SaaS
+  montantNet        Decimal            @db.Decimal(12, 2) // Montant réellement transféré (cagnotte ou versement)
+
+  userId            String
+  user              User               @relation(fields: [userId], references: [id])
+
+  tontineId         String?
+  tontine           Tontine?           @relation(fields: [tontineId], references: [id])
+
+  tontineMemberId   String?
+  tontineMember     TontineMember?     @relation(fields: [tontineMemberId], references: [id])
+
+  cycleConcerne     Int?               // Numéro du tour concerné par la cotisation/versement
+
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([type, statut])
+  @@index([tontineId])
+  @@map("transactions")
+}
+
+// ----------------------------------------------------------------------------
+// NOTIFICATIONS (alertes in-app pour les membres)
+// ----------------------------------------------------------------------------
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  titre     String
+  message   String
+  type      String   @default("INFO") // INFO, WARNING, SUCCESS, ERROR
+  lue       Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, lue])
+  @@map("notifications")
+}
+
+// ----------------------------------------------------------------------------
+// PAIEMENTS EN ATTENTE (liaison entre initiation et webhook asynchrone)
+// ----------------------------------------------------------------------------
+
+model PendingPayment {
+  id               String    @id @default(cuid())
+  tontineId        String
+  tontine          Tontine   @relation(fields: [tontineId], references: [id])
+  userId           String
+  user             User      @relation(fields: [userId], references: [id])
+  tontineMemberId  String
+  tontineMember    TontineMember @relation(fields: [tontineMemberId], references: [id])
+
+  provider         PaymentProvider
+  referenceInterne String    @unique // Clé de liaison envoyée au provider (ex: "tontineId:userId:timestamp")
+  referenceExterne String?   // ID retourné par le provider après initiation
+  montantBrut      Decimal   @db.Decimal(12, 2)
+
+  statut           String    @default("EN_ATTENTE") // EN_ATTENTE, REUSSIE, ECHOUEE, ANNULEE
+  webhookRecu      Boolean   @default(false)
+  dateWebhook      DateTime?
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([tontineId, userId])
+  @@index([statut])
+  @@map("pending_payments")
+}
+
+// ----------------------------------------------------------------------------
+// AUDIT LOG (traçabilité des actions sensibles du back-office)
+// ----------------------------------------------------------------------------
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  action       String   // ex: "USER_BLOCKED", "USER_UNBLOCKED", "TONTINE_SUSPENDED"
+  cible        String   // id de l'entité affectée (ex: userId)
+  details      String?  // description libre / JSON stringifié
+  acteurId     String   // id du SUPER_ADMIN ayant réalisé l'action
+  createdAt    DateTime @default(now())
+
+  @@index([acteurId])
+  @@map("audit_logs")
+}

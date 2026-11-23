@@ -1,0 +1,17 @@
+# Dépendances et artefacts de build
+node_modules/
+dist/
+.next/
+out/
+*.tsbuildinfo
+
+# Secrets locaux (les .env.example / .env.local.example restent versionnés)
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# Logs et fichiers système
+*.log
+.DS_Store
+Thumbs.db
