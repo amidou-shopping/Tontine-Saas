@@ -2,15 +2,27 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { apiFetch, getProfilServeur, enNombre } from '@/lib/api';
+import { apiFetch, getProfilServeur, enNombre, extraireMessageErreur } from '@/lib/api';
 import RevenueChart from '@/components/admin/RevenueChart';
 import UsersTable from '@/components/admin/UsersTable';
+
+interface TontineSupervision {
+  id: string;
+  nom: string;
+  statut: string;
+  codeInvitation: string;
+  suppressionDemandeeAt: string | null;
+  createur: { nom: string; prenom: string; email: string };
+  _count: { membres: number; transactions: number };
+}
 
 export default function AdminDashboardPage() {
   const router = useRouter();
   const [dashboard, setDashboard] = useState<any>(null);
   const [revenueTimeseries, setRevenueTimeseries] = useState<any[]>([]);
   const [users, setUsers] = useState<any[]>([]);
+  const [tontines, setTontines] = useState<TontineSupervision[]>([]);
+  const [actionEnCours, setActionEnCours] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [erreur, setErreur] = useState<string | null>(null);
 
@@ -34,16 +46,18 @@ export default function AdminDashboardPage() {
   async function chargerDonnees() {
     try {
       setLoading(true);
-      const [resDashboard, resRevenue, resUsers] = await Promise.all([
+      const [resDashboard, resRevenue, resUsers, resTontines] = await Promise.all([
         apiFetch('/api/admin/dashboard'),
         apiFetch('/api/admin/dashboard/revenue-timeseries'),
         apiFetch('/api/admin/users?limit=50'),
+        apiFetch('/api/admin/tontines'),
       ]);
 
       if (
         resDashboard.status === 401 ||
         resRevenue.status === 401 ||
-        resUsers.status === 401
+        resUsers.status === 401 ||
+        resTontines.status === 401
       ) {
         router.push('/login');
         return;
@@ -58,11 +72,40 @@ export default function AdminDashboardPage() {
         setRevenueTimeseries(Array.isArray(revenue.data) ? revenue.data : []);
       }
       setUsers((await resUsers.json()).data);
+      if (resTontines.ok) setTontines((await resTontines.json()) as TontineSupervision[]);
     } catch (err) {
       console.error(err);
       setErreur('Impossible de charger le tableau de bord.');
     } finally {
       setLoading(false);
+    }
+  }
+
+  /** Avertit le créateur et les membres avant toute suppression. */
+  async function avertirSuppression(id: string, nom: string) {
+    if (!confirm(`Avertir les membres de la tontine « ${nom} » d’une suppression programmée ?`)) return;
+    await actionnerSuppression(id, 'avertir-suppression', 'Avertissement enregistré.');
+  }
+
+  /** Suppression définitive : le serveur revérifie le délai et l'argent engagé. */
+  async function supprimerTontine(id: string, nom: string) {
+    if (!confirm(`SUPPRIMER définitivement la tontine « ${nom} » ? Le serveur refusera s’il reste de l’argent engagé ou si le délai n’est pas écoulé.`)) return;
+    await actionnerSuppression(id, 'supprimer', 'Tontine supprimée.');
+  }
+
+  async function actionnerSuppression(id: string, action: string, succes: string) {
+    try {
+      setActionEnCours(id);
+      const res = await apiFetch(`/api/admin/tontines/${id}/${action}`, { method: 'POST' });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(extraireMessageErreur(payload, 'Action impossible.'));
+      alert(extraireMessageErreur(payload, succes));
+      chargerDonnees();
+    } catch (err: any) {
+      console.error(err);
+      alert(err.message || 'Action impossible.');
+    } finally {
+      setActionEnCours(null);
     }
   }
 
@@ -94,6 +137,57 @@ export default function AdminDashboardPage() {
       <RevenueChart data={revenueTimeseries} />
 
       <UsersTable initialUsers={users} />
+
+      {/* Suppression sécurisée des tontines (Phase 3) */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm space-y-3">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-900">Tontines — suppression sécurisée</h2>
+          <p className="text-xs text-gray-500">
+            Un avertissement est obligatoire, puis un délai de 7 jours (configurable) doit s’écouler.
+            Toute tontine avec de l’argent engagé est définitivement protégée contre la suppression.
+          </p>
+        </div>
+        {tontines.length === 0 && (
+          <p className="text-sm text-gray-400">Aucune tontine.</p>
+        )}
+        <div className="space-y-2">
+          {tontines.map((t) => (
+            <div
+              key={t.id}
+              className="rounded-xl border border-gray-100 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+            >
+              <div>
+                <p className="text-sm font-medium text-gray-900">{t.nom}</p>
+                <p className="text-xs text-gray-500">
+                  {t.createur.prenom} {t.createur.nom} · {t._count.membres} membre(s) ·{' '}
+                  {t._count.transactions} transaction(s) · {t.statut}
+                </p>
+                {t.suppressionDemandeeAt && (
+                  <p className="text-xs text-amber-700">
+                    Avertie le {new Date(t.suppressionDemandeeAt).toLocaleDateString('fr-FR')}
+                  </p>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => avertirSuppression(t.id, t.nom)}
+                  disabled={actionEnCours === t.id}
+                  className="rounded-lg border border-amber-200 px-3 py-1.5 text-xs font-semibold text-amber-800 disabled:opacity-40"
+                >
+                  Avertir
+                </button>
+                <button
+                  onClick={() => supprimerTontine(t.id, t.nom)}
+                  disabled={actionEnCours === t.id}
+                  className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 disabled:opacity-40"
+                >
+                  Supprimer
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }

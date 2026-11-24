@@ -1,9 +1,16 @@
-import { IsEnum, IsOptional, IsString, Length, Matches } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsString, Length, Matches, Min } from 'class-validator';
 import { PaymentProvider } from '@prisma/client';
 
 export class PayerCotisationDto {
   @IsEnum(PaymentProvider, { message: 'Provider de paiement invalide.' })
   provider: PaymentProvider;
+
+  // Cycle à régler. Omitted = cotisation du cycle en cours ; renseigné avec le
+  // cycle précédent = règlement d'un arriéré (cotisation + amende).
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  cycleConcerne?: number;
 }
 
 export class UpdateProfilDto {

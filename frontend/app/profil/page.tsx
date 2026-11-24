@@ -2,7 +2,32 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { apiFetch, getCurrentUser, clearSession, enNombre } from '@/lib/api';
+import {
+  apiFetch,
+  extraireMessageErreur,
+  getCurrentUser,
+  clearSession,
+  enNombre,
+} from '@/lib/api';
+
+interface Abonnement {
+  id: string;
+  plan: string;
+  prixMensuel: number;
+  dateDebut: string;
+  dateFin: string | null;
+  actif: boolean;
+  enEssai: boolean;
+}
+
+interface Grille {
+  prixStandardFcfa: number;
+  prixPremiumFcfa: number;
+  limiteTontinesGratuites: number;
+  limiteTontinesStandard: number;
+  dureeEssaiJours: number;
+  dureeAbonnementJours: number;
+}
 
 interface Profil {
   id: string;
@@ -14,11 +39,7 @@ interface Profil {
   isVerified: boolean;
   avatarUrl: string | null;
   createdAt: string;
-  abonnement: {
-    plan: string;
-    prixMensuel: number;
-    actif: boolean;
-  } | null;
+  abonnement: Abonnement | null;
 }
 
 export default function ProfilPage() {
@@ -27,6 +48,12 @@ export default function ProfilPage() {
   const [loading, setLoading] = useState(true);
   const [sauvegarde, setSauvegarde] = useState(false);
   const [form, setForm] = useState({ nom: '', prenom: '', telephone: '' });
+  const [grille, setGrille] = useState<Grille | null>(null);
+  const [actionAbonnement, setActionAbonnement] = useState(false);
+  const [messageAbonnement, setMessageAbonnement] = useState<{
+    texte: string;
+    erreur: boolean;
+  } | null>(null);
 
   useEffect(() => {
     const user = getCurrentUser();
@@ -35,6 +62,7 @@ export default function ProfilPage() {
       return;
     }
     chargerProfil();
+    chargerGrille();
   }, []);
 
   async function chargerProfil() {
@@ -63,6 +91,65 @@ export default function ProfilPage() {
     }
   }
 
+  async function chargerGrille() {
+    try {
+      const res = await apiFetch('/api/subscriptions/plans');
+      if (res.ok) setGrille((await res.json()) as Grille);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  /** Les règles (essai, prix, limites) sont vérifiées côté serveur. */
+  async function changerPlan(plan: 'STANDARD' | 'PREMIUM') {
+    if (
+      !confirm(
+        `Passer au plan ${plan} ? Le premier plan payant démarre par une période d’essai gratuite ; le paiement est simulé dans cette version.`,
+      )
+    )
+      return;
+
+    setActionAbonnement(true);
+    setMessageAbonnement(null);
+    try {
+      const res = await apiFetch('/api/subscriptions/changer-plan', {
+        method: 'POST',
+        body: JSON.stringify({ plan }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok)
+        throw new Error(extraireMessageErreur(payload, 'Changement de plan impossible.'));
+      setMessageAbonnement({ texte: `Plan ${plan} activé.`, erreur: false });
+      await chargerProfil();
+    } catch (err: any) {
+      setMessageAbonnement({
+        texte: err.message || 'Changement de plan impossible.',
+        erreur: true,
+      });
+    } finally {
+      setActionAbonnement(false);
+    }
+  }
+
+  async function renouveler() {
+    setActionAbonnement(true);
+    setMessageAbonnement(null);
+    try {
+      const res = await apiFetch('/api/subscriptions/renouveler', { method: 'POST' });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(extraireMessageErreur(payload, 'Renouvellement impossible.'));
+      setMessageAbonnement({ texte: 'Abonnement renouvelé.', erreur: false });
+      await chargerProfil();
+    } catch (err: any) {
+      setMessageAbonnement({
+        texte: err.message || 'Renouvellement impossible.',
+        erreur: true,
+      });
+    } finally {
+      setActionAbonnement(false);
+    }
+  }
+
   async function sauvegarder(e: React.FormEvent) {
     e.preventDefault();
     try {
@@ -86,6 +173,10 @@ export default function ProfilPage() {
     clearSession();
     router.push('/login');
   }
+
+  const abonnement = profil?.abonnement ?? null;
+  const peutGererAbonnement =
+    profil?.role === 'ADMIN_TONTINE' || profil?.role === 'SUPER_ADMIN';
 
   if (loading) return <div className="p-8 text-center text-gray-500">Chargement...</div>;
   if (!profil) return <div className="p-8 text-center text-red-600">Profil introuvable.</div>;
@@ -170,30 +261,110 @@ export default function ProfilPage() {
         </button>
       </form>
 
-      {/* Abonnement */}
+      {/* Abonnement (Phase 6) */}
       <div className="rounded-2xl border border-gray-200 shadow-sm p-4 bg-white space-y-3">
         <h2 className="text-sm font-semibold text-gray-700">Mon abonnement</h2>
-        {profil.abonnement ? (
+
+        {messageAbonnement && (
+          <p
+            className={`text-xs ${messageAbonnement.erreur ? 'text-red-600' : 'text-green-600'}`}
+          >
+            {messageAbonnement.texte}
+          </p>
+        )}
+
+        {abonnement ? (
           <>
             <div className="flex justify-between text-sm">
               <span className="text-gray-500">Plan</span>
-              <span className="font-medium text-gray-900">{profil.abonnement.plan}</span>
+              <span className="font-medium text-gray-900">{abonnement.plan}</span>
             </div>
             <div className="flex justify-between text-sm">
-              <span className="text-gray-500">Prix mensuel</span>
+              <span className="text-gray-500">Prix du plan</span>
               <span className="font-medium text-gray-900">
-                {profil.abonnement.prixMensuel.toLocaleString('fr-FR')} FCFA
+                {abonnement.prixMensuel.toLocaleString('fr-FR')} FCFA
               </span>
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-gray-500">Statut</span>
-              <span className={`font-medium ${profil.abonnement.actif ? 'text-green-600' : 'text-red-600'}`}>
-                {profil.abonnement.actif ? 'Actif' : 'Inactif'}
+              <span
+                className={`font-medium ${
+                  abonnement.actif
+                    ? abonnement.enEssai
+                      ? 'text-sky-600'
+                      : 'text-green-600'
+                    : 'text-red-600'
+                }`}
+              >
+                {!abonnement.actif
+                  ? 'Expiré'
+                  : abonnement.enEssai
+                    ? 'Période d’essai gratuite'
+                    : 'Actif'}
               </span>
             </div>
+            {abonnement.dateFin && (
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-500">Échéance</span>
+                <span className="font-medium text-gray-900">
+                  {new Date(abonnement.dateFin).toLocaleDateString('fr-FR')}
+                </span>
+              </div>
+            )}
+            {abonnement.plan !== 'GRATUIT' && !abonnement.actif && (
+              <button
+                onClick={renouveler}
+                disabled={actionAbonnement}
+                className="w-full rounded-xl bg-amber-600 text-white py-2 text-xs font-semibold disabled:opacity-40"
+              >
+                {actionAbonnement ? '...' : 'Renouveler mon abonnement'}
+              </button>
+            )}
           </>
         ) : (
-          <p className="text-gray-500 text-sm">Aucun abonnement actif.</p>
+          <p className="text-gray-500 text-sm">Aucun abonnement enregistré.</p>
+        )}
+
+        {/* La grille affichée vient de la configuration serveur, jamais du code client. */}
+        {peutGererAbonnement && (
+          <div className="border-t border-gray-100 pt-3 space-y-2">
+            <p className="text-xs font-semibold text-gray-600">Choisir un plan</p>
+            {grille ? (
+              <ul className="text-xs text-gray-600 space-y-1">
+                <li>
+                  GRATUIT — {grille.limiteTontinesGratuites} tontine
+                  {grille.limiteTontinesGratuites > 1 ? 's' : ''}
+                </li>
+                <li>
+                  STANDARD — {grille.prixStandardFcfa.toLocaleString('fr-FR')} FCFA /{' '}
+                  {grille.dureeAbonnementJours} jours — {grille.limiteTontinesStandard} tontines
+                </li>
+                <li>
+                  PREMIUM — {grille.prixPremiumFcfa.toLocaleString('fr-FR')} FCFA /{' '}
+                  {grille.dureeAbonnementJours} jours — illimité
+                </li>
+                <li>Essai gratuit : {grille.dureeEssaiJours} jours (une seule fois).</li>
+              </ul>
+            ) : (
+              <p className="text-xs text-gray-500">Grille indisponible pour le moment.</p>
+            )}
+            <div className="flex gap-2">
+              <button
+                onClick={() => changerPlan('STANDARD')}
+                disabled={actionAbonnement}
+                className="flex-1 rounded-xl border border-sky-200 text-sky-700 py-2 text-xs font-semibold disabled:opacity-40"
+              >
+                STANDARD
+              </button>
+              <button
+                onClick={() => changerPlan('PREMIUM')}
+                disabled={actionAbonnement}
+                className="flex-1 rounded-xl bg-sky-600 text-white py-2 text-xs font-semibold disabled:opacity-40"
+              >
+                PREMIUM
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>

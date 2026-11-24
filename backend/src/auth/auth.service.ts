@@ -7,6 +7,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { Role } from '@prisma/client';
 import { randomInt } from 'crypto';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
@@ -46,6 +47,10 @@ export class AuthService {
 
     const passwordHash = await bcrypt.hash(dto.password, SALT_ROUNDS);
 
+    // Défense en profondeur : une inscription publique crée TOUJOURS un MEMBER.
+    // Le DTO n'accepte pas `role` et le ValidationPipe global rejette les champs
+    // non déclarés, mais on l'impose aussi ici au cas où un appel interne serait
+    // fait avec un payload enrichi. Seul le back-office peut élever un rôle.
     const user = await this.prisma.user.create({
       data: {
         email: dto.email,
@@ -53,6 +58,7 @@ export class AuthService {
         passwordHash,
         nom: dto.nom,
         prenom: dto.prenom,
+        role: Role.MEMBER,
       },
     });
 

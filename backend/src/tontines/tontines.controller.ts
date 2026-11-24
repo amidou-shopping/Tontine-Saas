@@ -5,10 +5,14 @@ import { Roles } from '../auth/roles.decorator';
 import { Role } from '@prisma/client';
 import { TontinesService } from './tontines.service';
 import { CreateTontineDto } from './dto/create-tontine.dto';
-import { AjouterMembreDto, RejoindreParCodeDto } from './dto/tontine-actions.dto';
+import {
+  AjouterMembreDto,
+  RejoindreParCodeDto,
+  RepondreDemandeDto,
+} from './dto/tontine-actions.dto';
 
 @Controller('tontines')
-@UseGuards(JwtAuthGuard) // Toute personne connectée peut créer/rejoindre (sous réserve de son abonnement)
+@UseGuards(JwtAuthGuard) // Toute personne connectée peut demander à rejoindre
 export class TontinesController {
   constructor(private readonly tontinesService: TontinesService) {}
 
@@ -25,10 +29,16 @@ export class TontinesController {
   }
 
   @Post()
+  @Roles(Role.ADMIN_TONTINE, Role.SUPER_ADMIN)
+  @UseGuards(RolesGuard)
   creer(@Body() dto: CreateTontineDto, @Req() req: any) {
     return this.tontinesService.creer(req.user.id, dto);
   }
 
+  /**
+   * Phase 3 : le code permet de retrouver la tontine, mais l'entrée effective
+   * passe toujours par une demande acceptée par l'administrateur.
+   */
   @Post('rejoindre-par-code')
   rejoindreParCode(@Body() dto: RejoindreParCodeDto, @Req() req: any) {
     return this.tontinesService.rejoindreParCode(dto.codeInvitation, req.user.id);
@@ -37,6 +47,63 @@ export class TontinesController {
   @Post(':id/rejoindre')
   rejoindre(@Param('id') id: string, @Req() req: any) {
     return this.tontinesService.rejoindre(id, req.user.id);
+  }
+
+  @Get(':id/demandes')
+  @Roles(Role.ADMIN_TONTINE, Role.SUPER_ADMIN)
+  @UseGuards(RolesGuard)
+  listerDemandes(@Param('id') id: string, @Req() req: any) {
+    return this.tontinesService.listerDemandes(
+      id,
+      req.user.id,
+      req.user.role === Role.SUPER_ADMIN,
+    );
+  }
+
+  @Post('demandes/:demandeId/accepter')
+  @Roles(Role.ADMIN_TONTINE, Role.SUPER_ADMIN)
+  @UseGuards(RolesGuard)
+  accepterDemande(@Param('demandeId') demandeId: string, @Req() req: any) {
+    return this.tontinesService.repondreDemande(
+      demandeId,
+      req.user.id,
+      true,
+      undefined,
+      req.user.role === Role.SUPER_ADMIN,
+    );
+  }
+
+  @Post('demandes/:demandeId/refuser')
+  @Roles(Role.ADMIN_TONTINE, Role.SUPER_ADMIN)
+  @UseGuards(RolesGuard)
+  refuserDemande(
+    @Param('demandeId') demandeId: string,
+    @Body() dto: RepondreDemandeDto,
+    @Req() req: any,
+  ) {
+    return this.tontinesService.repondreDemande(
+      demandeId,
+      req.user.id,
+      false,
+      dto.motifRefus,
+      req.user.role === Role.SUPER_ADMIN,
+    );
+  }
+
+  @Post(':id/membres/:userId/exclure')
+  @Roles(Role.ADMIN_TONTINE, Role.SUPER_ADMIN)
+  @UseGuards(RolesGuard)
+  exclureMembre(
+    @Param('id') id: string,
+    @Param('userId') userId: string,
+    @Req() req: any,
+  ) {
+    return this.tontinesService.exclureMembre(
+      id,
+      userId,
+      req.user.id,
+      req.user.role === Role.SUPER_ADMIN,
+    );
   }
 
   @Post(':id/demarrer')

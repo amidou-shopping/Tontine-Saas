@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { apiFetch, getCurrentUser, enNombre } from '@/lib/api';
+import { LIBELLES_JOURS, type JourSemaine } from '@/lib/jours-semaine';
 
 interface MembreTontine {
   id: string;
@@ -38,6 +39,7 @@ interface DetailTontine {
   type: string;
   montantCotisation: number;
   frequence: string;
+  jourCotisation: JourSemaine;
   tauxCommission: number;
   nombreMaxMembres: number;
   statut: string;
@@ -104,6 +106,9 @@ export default function TontineDetailPage() {
   if (loading) return <div className="p-8 text-center text-gray-500">Chargement...</div>;
   if (!tontine) return <div className="p-8 text-center text-red-600">Tontine introuvable.</div>;
 
+  const utilisateur = getCurrentUser<{ id: string }>();
+  const monStatut = tontine.membres.find((m) => m.user.id === utilisateur?.id)?.statut;
+
   return (
     <div className="max-w-2xl mx-auto px-4 py-6 space-y-6">
       <button
@@ -112,6 +117,20 @@ export default function TontineDetailPage() {
       >
         ← Retour
       </button>
+
+      {/* Phase 3 : un membre exclu est prévenu du remboursement à la clôture. */}
+      {monStatut === 'EXCLU' && (
+        <div
+          role="alert"
+          className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700"
+        >
+          <p className="font-semibold">Vous avez été exclu de cette tontine.</p>
+          <p className="mt-1 text-xs">
+            Les cotisations et amendes déjà réglées vous seront remboursées à la clôture de la
+            tontine. Vous ne pouvez plus effectuer de paiement ici.
+          </p>
+        </div>
+      )}
 
       {/* En-tête */}
       <div className="rounded-2xl border border-gray-200 shadow-sm p-4 bg-white space-y-3">
@@ -139,8 +158,11 @@ export default function TontineDetailPage() {
             </p>
           </div>
           <div>
-            <p className="text-gray-500">Fréquence</p>
-            <p className="font-semibold text-gray-900">{tontine.frequence}</p>
+            <p className="text-gray-500">Jour de cotisation</p>
+            <p className="font-semibold text-gray-900">
+              {LIBELLES_JOURS[tontine.jourCotisation]?.[0].toUpperCase()}
+              {LIBELLES_JOURS[tontine.jourCotisation]?.slice(1) ?? tontine.jourCotisation}
+            </p>
           </div>
           <div>
             <p className="text-gray-500">Cycle actuel</p>
@@ -191,11 +213,17 @@ export default function TontineDetailPage() {
                 </div>
                 <div>
                   <p className="font-medium text-gray-900 text-sm">{m.user.prenom} {m.user.nom}</p>
-                  <p className="text-xs text-gray-500">Tour #{m.ordrePassage}</p>
+                  <p className="text-xs text-gray-500">
+                     Tour #{m.ordrePassage} · ordre tiré au sort au démarrage
+                   </p>
                 </div>
               </div>
               <div className="text-right">
-                {m.aDejaRecu ? (
+                {m.statut === 'EXCLU' ? (
+                  <span className="text-xs font-medium px-2 py-1 rounded-full bg-red-100 text-red-700">
+                    Exclu — remboursé à la clôture
+                  </span>
+                ) : m.aDejaRecu ? (
                   <span className="text-xs font-medium px-2 py-1 rounded-full bg-green-100 text-green-700">
                     A reçu
                   </span>

@@ -1,9 +1,4 @@
-import {
-  BadRequestException,
-  ConflictException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../common/redis.service';
@@ -13,7 +8,7 @@ import { OrangeMoneyProvider } from './providers/orange-money.provider';
 import { PaytechProvider } from './providers/paytech.provider';
 import { PaymentProviderClient } from './providers/payment-provider.interface';
 import { trouverSignatureHeader } from './providers/signature.util';
-import { PaymentProvider, TontineStatus, TransactionStatus, TransactionType } from '@prisma/client';
+import { PaymentProvider } from '@prisma/client';
 
 const WEBHOOK_MAX_AGE_SECONDS = 5 * 60;
 
@@ -53,34 +48,32 @@ export class PaymentsService {
     userId: string,
     providerName: string,
     telephone?: string,
+    cycleDemande?: number,
   ) {
     const provider = this.getProvider(providerName);
+
+    // Le service métier décide du cycle à régler et applique le blocage des
+    // arriérés. Les contrôles seront refaits sous le verrou advisory lors de
+    // l'enregistrement définitif.
+    const cible = await this.tontinesService.analyserPaiement(
+      tontineId,
+      userId,
+      cycleDemande,
+    );
     const tontine = await this.prisma.tontine.findUnique({ where: { id: tontineId } });
     if (!tontine) throw new NotFoundException('Tontine introuvable.');
-    if (tontine.statut !== TontineStatus.ACTIVE) {
-      throw new BadRequestException("Cette tontine n'est pas active.");
-    }
-
     const membre = await this.prisma.tontineMember.findUnique({
       where: { tontineId_userId: { tontineId, userId } },
     });
     if (!membre) throw new BadRequestException("Vous n'êtes pas membre de cette tontine.");
 
-    const dejaPaye = await this.prisma.transaction.findFirst({
-      where: {
-        tontineMemberId: membre.id,
-        type: TransactionType.COTISATION,
-        cycleConcerne: tontine.cycleActuel,
-        statut: TransactionStatus.REUSSIE,
-      },
-    });
-    if (dejaPaye) throw new ConflictException('Cotisation déjà payée pour ce cycle.');
-
     const numero = telephone ?? (await this.prisma.user.findUnique({ where: { id: userId } }))?.telephone;
-    const referenceInterne = `${tontineId}:${userId}:${tontine.cycleActuel}:${randomUUID()}`;
+    const referenceInterne = `${tontineId}:${userId}:${cible.cycle}:${randomUUID()}`;
 
+    // Le montant présenté au provider inclut l'amende : aucune commission
+    // supplémentaire n'est prélevée dessus côté plateforme.
     const { referenceExterne } = await provider.initierPaiement(
-      Number(tontine.montantCotisation),
+      cible.montantTotal,
       numero ?? '',
       referenceInterne,
     );
@@ -93,7 +86,8 @@ export class PaymentsService {
         provider: providerName as PaymentProvider,
         referenceInterne,
         referenceExterne,
-        montantBrut: tontine.montantCotisation,
+        montantBrut: cible.montantTotal,
+        cycleConcerne: cible.cycle,
       },
     });
 
@@ -104,6 +98,7 @@ export class PaymentsService {
         providerName as PaymentProvider,
         referenceExterne,
         pending.id,
+        cible.cycle,
       );
     } catch (erreur) {
       await this.prisma.pendingPayment.update({
@@ -182,6 +177,7 @@ export class PaymentsService {
       pending.provider,
       pending.referenceExterne ?? payload?.transaction_id ?? undefined,
       pending.id,
+      pending.cycleConcerne ?? undefined,
     );
 
     return { received: true, statut: 'REUSSIE' };

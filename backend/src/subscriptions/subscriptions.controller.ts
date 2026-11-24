@@ -16,11 +16,25 @@ export class SubscriptionsController {
     return this.subscriptionsService.getAbonnement(req.user.id);
   }
 
+  /** Grille des plans (protégée par le JWT de classe). */
+  @Get('plans')
+  getPlans() {
+    return this.subscriptionsService.getGrille();
+  }
+
   @Post('changer-plan')
   @Roles(Role.ADMIN_TONTINE, Role.SUPER_ADMIN)
   @UseGuards(RolesGuard)
   changerPlan(@Req() req: any, @Body() dto: ChangerPlanDto) {
     return this.subscriptionsService.changerPlan(req.user.id, dto.plan, req.user.role);
+  }
+
+  /** Renouvelle un plan payant expiré (paiement simulé, montant configuré). */
+  @Post('renouveler')
+  @Roles(Role.ADMIN_TONTINE, Role.SUPER_ADMIN)
+  @UseGuards(RolesGuard)
+  renouveler(@Req() req: any) {
+    return this.subscriptionsService.renouveler(req.user.id);
   }
 
   @Post('annuler')

@@ -4,26 +4,47 @@
  *
  * Lancer avec : npm run prisma:seed
  */
-import { PrismaClient, Role, TontineType, TontineFrequency, TontineStatus } from '@prisma/client';
+import { PrismaClient, Role, TontineType, TontineFrequency, TontineStatus, JourSemaine } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
+import {
+  peutSeederCompteDemo,
+  promouvoirSuperAdminDansTransaction,
+} from '../src/common/super-admins.util';
 
 const prisma = new PrismaClient();
 
 async function main() {
+  // Le compte démo a un email et un mot de passe publics : il ne doit jamais
+  // être créé (ni annoncé dans les logs) hors environnement de développement.
+  if (!peutSeederCompteDemo(process.env.NODE_ENV)) {
+    throw new Error(
+      'Seed refusé : le compte de démonstration ne peut être créé qu’en développement (jamais en production).',
+    );
+  }
+
   const motDePasseHash = await bcrypt.hash('Password123!', 12);
 
-  const superAdmin = await prisma.user.upsert({
-    where: { email: 'admin@tontine.sn' },
-    update: {},
-    create: {
-      email: 'admin@tontine.sn',
-      telephone: '+221770000001',
-      passwordHash: motDePasseHash,
-      nom: 'Diop',
-      prenom: 'Fatou',
-      role: Role.SUPER_ADMIN,
-      isVerified: true,
-    },
+  // Phase 4 : la création du SUPER_ADMIN de démo passe par la même règle que
+  // le back-office : transaction + verrou + plafond configurable.
+  const superAdmin = await prisma.$transaction(async (tx) => {
+    let compte = await tx.user.findUnique({ where: { email: 'admin@tontine.sn' } });
+    if (!compte) {
+      compte = await tx.user.create({
+        data: {
+          email: 'admin@tontine.sn',
+          telephone: '+221770000001',
+          passwordHash: motDePasseHash,
+          nom: 'Diop',
+          prenom: 'Fatou',
+          role: Role.MEMBER,
+          isVerified: true,
+        },
+      });
+    }
+    if (compte.role === Role.SUPER_ADMIN) {
+      return { id: compte.id, email: compte.email, role: compte.role };
+    }
+    return promouvoirSuperAdminDansTransaction(tx, compte.id);
   });
 
   const creatrice = await prisma.user.upsert({
@@ -59,12 +80,13 @@ async function main() {
     update: {},
     create: {
       nom: 'Tontine des Amies de Sicap',
-      description: 'Tontine mensuelle entre voisines du quartier Sicap.',
+      description: 'Tontine hebdomadaire entre voisines du quartier Sicap.',
       type: TontineType.CLASSIQUE,
       montantCotisation: 10000,
-      frequence: TontineFrequency.MENSUELLE,
+      frequence: TontineFrequency.HEBDOMADAIRE,
+      jourCotisation: JourSemaine.LUNDI,
       nombreMaxMembres: 4,
-      tauxCommission: 0.015,
+      tauxCommission: 0.03,
       statut: TontineStatus.ACTIVE,
       dateDebut: new Date(),
       cycleActuel: 1,
@@ -95,7 +117,7 @@ async function main() {
   );
 
   console.log('Seed terminé :');
-  console.log(`- Super-admin : ${superAdmin.email} / Password123!`);
+  console.log(`- Super-admin (développement uniquement) : ${superAdmin.email} / Password123!`);
   console.log(`- Tontine créée : ${tontine.nom} (id: ${tontine.id})`);
 }
 

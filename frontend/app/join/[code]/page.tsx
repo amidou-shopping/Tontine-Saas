@@ -6,8 +6,9 @@ import { useParams, useRouter } from 'next/navigation';
 import { apiFetch, extraireMessageErreur } from '@/lib/api';
 
 /**
- * Page d'invitation : un membre suit /join/CODE et rejoint automatiquement
- * la tontine correspondante via l'endpoint dédié, puis est redirigé.
+ * Page d'invitation : un membre suit /join/CODE et envoie une demande
+ * d'adhésion à l'administrateur de la tontine. L'entrée effective n'a lieu
+ * qu'après acceptation de cette demande.
  */
 export default function JoinPage() {
   const params = useParams();
@@ -42,12 +43,15 @@ export default function JoinPage() {
 
         if (!res.ok) {
           setEtat('erreur');
-          setMessage(extraireMessageErreur(data, 'Impossible de rejoindre cette tontine.'));
+          setMessage(extraireMessageErreur(data, 'Impossible d’envoyer la demande.'));
           return;
         }
 
         setEtat('succes');
-        setMessage('Vous avez rejoint la tontine ! Redirection vers votre tableau de bord...');
+        setMessage(
+          extraireMessageErreur(data, 'Demande envoyée à l’administrateur de la tontine.') +
+            ' Redirection vers votre tableau de bord...',
+        );
         timer = setTimeout(() => router.push('/dashboard'), 1500);
       } catch (err) {
         console.error(err);
@@ -78,7 +82,7 @@ export default function JoinPage() {
         </div>
 
         {etat === 'chargement' && (
-          <p className="text-sm text-gray-500">Rejoindre la tontine en cours...</p>
+          <p className="text-sm text-gray-500">Envoi de votre demande d’adhésion...</p>
         )}
 
         {message && etat === 'succes' && (

@@ -14,7 +14,23 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { apiFetch, enNombre } from '@/lib/api';
+import {
+  apiFetch,
+  enNombre,
+  extraireMessageErreur,
+  getCurrentUser,
+  getToken,
+  setSession,
+} from '@/lib/api';
+import { JOURS_SEMAINE, LIBELLES_JOURS, texteDuree, type JourSemaine } from '@/lib/jours-semaine';
+
+interface Arriere {
+  cycle: number;
+  cotisationDue: number;
+  amende: number;
+  montantTotal: number;
+  dateEcheance: string;
+}
 
 interface TontineResume {
   id: string;
@@ -24,7 +40,8 @@ interface TontineResume {
   prochainEcheance: string; // ISO date
   monTour: number;          // Rang de passage du membre
   cycleActuel: number;      // Tour en cours dans la tontine
-  statutCotisation: 'PAYE' | 'EN_ATTENTE' | 'EN_RETARD';
+  statutCotisation: 'PAYE' | 'EN_ATTENTE' | 'EN_RETARD' | 'ARRIERE';
+  arriere?: Arriere | null;
   codeInvitation?: string;
 }
 
@@ -49,7 +66,15 @@ interface TontineCreee {
   codeInvitation: string;
 }
 
-export default function MemberDashboard() {
+interface DemandeAdhesion {
+  id: string;
+  statut: 'EN_ATTENTE' | 'ACCEPTEE' | 'REFUSEE';
+  motifRefus: string | null;
+  createdAt: string;
+  tontine: { id: string; nom: string; codeInvitation: string; statut: string };
+}
+
+export default function MemberDashboard({ role }: { role: string }) {
   const router = useRouter();
   const [tontines, setTontines] = useState<TontineResume[]>([]);
   const [tontinesDisponibles, setTontinesDisponibles] = useState<TontineDisponible[]>([]);
@@ -57,8 +82,15 @@ export default function MemberDashboard() {
   const [tontineEnPaiement, setTontineEnPaiement] = useState<string | null>(null);
   const [providerChoisi, setProviderChoisi] = useState<string | null>(null);
   const [paiementEnCours, setPaiementEnCours] = useState(false);
+  const [cycleEnPaiement, setCycleEnPaiement] = useState<number | null>(null);
   const [messageSucces, setMessageSucces] = useState<string | null>(null);
+  const [messageErreur, setMessageErreur] = useState<string | null>(null);
   const [rejoindreEnCours, setRejoindreEnCours] = useState<string | null>(null);
+  const [roleActuel, setRoleActuel] = useState(role);
+  const [devenirAdminEnCours, setDevenirAdminEnCours] = useState(false);
+  const [demandes, setDemandes] = useState<DemandeAdhesion[]>([]);
+
+  const peutCreer = roleActuel === 'ADMIN_TONTINE' || roleActuel === 'SUPER_ADMIN';
 
   // États pour la création de tontine
   const [modalCreationOuverte, setModalCreationOuverte] = useState(false);
@@ -68,7 +100,7 @@ export default function MemberDashboard() {
     nom: '',
     description: '',
     montantCotisation: '',
-    frequence: 'MENSUELLE',
+    jourCotisation: 'LUNDI' as JourSemaine,
     nombreMaxMembres: '10',
   });
 
@@ -79,6 +111,7 @@ export default function MemberDashboard() {
   useEffect(() => {
     fetchMesTontines();
     fetchTontinesDisponibles();
+    fetchMesDemandes();
   }, []);
 
   async function fetchMesTontines() {
@@ -111,20 +144,58 @@ export default function MemberDashboard() {
     }
   }
 
+  async function fetchMesDemandes() {
+    try {
+      const res = await apiFetch('/api/member/demandes');
+      if (res.ok) setDemandes((await res.json()) as DemandeAdhesion[]);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  /**
+   * Passage explicite au rôle ADMIN_TONTINE. Le serveur ne peut jamais
+   * accorder SUPER_ADMIN depuis cette route.
+   */
+  async function devenirAdmin() {
+    try {
+      setDevenirAdminEnCours(true);
+      const res = await apiFetch('/api/member/devenir-admin', { method: 'POST' });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(extraireMessageErreur(payload, 'Impossible de devenir admin.'));
+
+      setRoleActuel('ADMIN_TONTINE');
+      const token = getToken();
+      const utilisateur = getCurrentUser<Record<string, unknown>>();
+      if (token && utilisateur) {
+        setSession(token, { ...utilisateur, role: 'ADMIN_TONTINE' });
+      }
+      setMessageSucces(extraireMessageErreur(payload, 'Vous êtes désormais administrateur.'));
+    } catch (err: any) {
+      setMessageErreur(err.message || 'Impossible de devenir administrateur.');
+    } finally {
+      setDevenirAdminEnCours(false);
+    }
+  }
+
   async function rejoindreTontine(tontineId: string) {
     try {
       setRejoindreEnCours(tontineId);
       const res = await apiFetch(`/api/tontines/${tontineId}/rejoindre`, {
         method: 'POST',
       });
-      if (!res.ok) throw new Error('Impossible de rejoindre');
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(extraireMessageErreur(payload, 'Impossible d’envoyer la demande.'));
+      }
 
-      setMessageSucces('Vous avez rejoint la tontine !');
+      setMessageSucces(extraireMessageErreur(payload, 'Demande envoyée à l’administrateur.'));
       setTontinesDisponibles((prev) => prev.filter((t) => t.id !== tontineId));
       fetchMesTontines();
-    } catch (err) {
+      fetchMesDemandes();
+    } catch (err: any) {
       console.error(err);
-      alert('Impossible de rejoindre cette tontine.');
+      setMessageErreur(err.message || 'Impossible d’envoyer la demande.');
     } finally {
       setRejoindreEnCours(null);
     }
@@ -138,18 +209,19 @@ export default function MemberDashboard() {
         method: 'POST',
         body: JSON.stringify({ codeInvitation: codeInvitation.trim() }),
       });
+      const payload = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.message || 'Code invalide');
+        throw new Error(extraireMessageErreur(payload, 'Code d’invitation invalide.'));
       }
 
-      setMessageSucces('Vous avez rejoint la tontine via le code d\'invitation !');
+      setMessageSucces(extraireMessageErreur(payload, 'Demande envoyée à l’administrateur.'));
       setCodeInvitation('');
       fetchMesTontines();
       fetchTontinesDisponibles();
+      fetchMesDemandes();
     } catch (err: any) {
       console.error(err);
-      alert(err.message || 'Code d\'invitation invalide.');
+      setMessageErreur(err.message || 'Code d’invitation invalide.');
     } finally {
       setRejoindreParCodeEnCours(false);
     }
@@ -165,20 +237,21 @@ export default function MemberDashboard() {
           nom: formTontine.nom,
           description: formTontine.description,
           montantCotisation: Number(formTontine.montantCotisation),
-          frequence: formTontine.frequence,
+          jourCotisation: formTontine.jourCotisation,
           nombreMaxMembres: Number(formTontine.nombreMaxMembres),
         }),
       });
-      if (!res.ok) throw new Error('Erreur lors de la création');
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(extraireMessageErreur(payload, 'Impossible de créer la tontine.'));
 
-      const data: TontineCreee = await res.json();
+      const data: TontineCreee = payload as TontineCreee;
       setNouvelleTontine(data);
       setModalCreationOuverte(false);
-      setFormTontine({ nom: '', description: '', montantCotisation: '', frequence: 'MENSUELLE', nombreMaxMembres: '10' });
+      setFormTontine({ nom: '', description: '', montantCotisation: '', jourCotisation: 'LUNDI', nombreMaxMembres: '10' });
       fetchTontinesDisponibles();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert('Impossible de créer la tontine.');
+      setMessageErreur(err.message || 'Impossible de créer la tontine.');
     } finally {
       setCreationEnCours(false);
     }
@@ -192,21 +265,33 @@ export default function MemberDashboard() {
    */
   async function payerCotisation(tontineId: string) {
     if (!providerChoisi) return;
+    setMessageErreur(null);
     try {
       setPaiementEnCours(true);
       const res = await apiFetch(`/api/member/tontines/${tontineId}/payer`, {
         method: 'POST',
-        body: JSON.stringify({ provider: providerChoisi }),
+        body: JSON.stringify({
+          provider: providerChoisi,
+          ...(cycleEnPaiement ? { cycleConcerne: cycleEnPaiement } : {}),
+        }),
       });
-      if (!res.ok) throw new Error('Le paiement a échoué');
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(extraireMessageErreur(payload, 'Le paiement a échoué.'));
+      }
 
-      setMessageSucces('Cotisation payée avec succès !');
+      setMessageSucces(
+        cycleEnPaiement
+          ? 'Arriéré réglé. Vous pouvez maintenant payer le tour en cours.'
+          : 'Cotisation payée avec succès !',
+      );
       setTontineEnPaiement(null);
+      setCycleEnPaiement(null);
       setProviderChoisi(null);
-      fetchMesTontines(); // Rafraîchit l'état des échéances
-    } catch (err) {
+      fetchMesTontines(); // Rafraîchit l'état des échéances et l'arriéré
+    } catch (err: any) {
       console.error(err);
-      alert("Une erreur est survenue lors du paiement. Réessayez.");
+      setMessageErreur(err.message || 'Une erreur est survenue lors du paiement. Réessayez.');
     } finally {
       setPaiementEnCours(false);
     }
@@ -226,16 +311,42 @@ export default function MemberDashboard() {
         </div>
       )}
 
-      {/* Bouton Créer une tontine */}
-      <button
-        onClick={() => setModalCreationOuverte(true)}
-        className="w-full rounded-xl bg-sky-600 text-white py-3 text-sm font-semibold hover:bg-sky-700 transition"
-      >
-        + Créer une tontine
-      </button>
+      {messageErreur && (
+        <div
+          role="alert"
+          className="rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm p-3"
+        >
+          {messageErreur}
+        </div>
+      )}
+
+      {/* Création réservée aux ADMIN_TONTINE / SUPER_ADMIN */}
+      {peutCreer ? (
+        <button
+          onClick={() => setModalCreationOuverte(true)}
+          className="w-full rounded-xl bg-sky-600 text-white py-3 text-sm font-semibold hover:bg-sky-700 transition"
+        >
+          + Créer une tontine
+        </button>
+      ) : (
+        <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 space-y-2">
+          <p className="text-sm font-semibold text-sky-900">Vous êtes membre</p>
+          <p className="text-xs text-sky-800">
+            Seuls les administrateurs peuvent créer une tontine. Vous pouvez demander à rejoindre
+            une tontine existante, ou devenir administrateur gratuitement.
+          </p>
+          <button
+            onClick={devenirAdmin}
+            disabled={devenirAdminEnCours}
+            className="w-full rounded-xl bg-sky-600 text-white py-2.5 text-sm font-semibold hover:bg-sky-700 disabled:opacity-40"
+          >
+            {devenirAdminEnCours ? 'Patientez...' : 'Devenir Admin'}
+          </button>
+        </div>
+      )}
 
       {/* Modal de création de tontine */}
-      {modalCreationOuverte && (
+      {peutCreer && modalCreationOuverte && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-2xl p-6 w-full max-w-sm space-y-4">
             <h2 className="text-lg font-bold text-gray-900">Créer une tontine</h2>
@@ -274,16 +385,23 @@ export default function MemberDashboard() {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Fréquence *</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Jour de cotisation *</label>
                 <select
-                  value={formTontine.frequence}
-                  onChange={(e) => setFormTontine({ ...formTontine, frequence: e.target.value })}
+                  value={formTontine.jourCotisation}
+                  onChange={(e) =>
+                    setFormTontine({ ...formTontine, jourCotisation: e.target.value as JourSemaine })
+                  }
                   className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
                 >
-                  <option value="QUOTIDIENNE">Quotidienne</option>
-                  <option value="HEBDOMADAIRE">Hebdomadaire</option>
-                  <option value="MENSUELLE">Mensuelle</option>
+                  {JOURS_SEMAINE.map((jour) => (
+                    <option key={jour} value={jour}>
+                      {LIBELLES_JOURS[jour][0].toUpperCase() + LIBELLES_JOURS[jour].slice(1)}
+                    </option>
+                  ))}
                 </select>
+                <p className="mt-1 text-[11px] text-gray-500">
+                  Une cotisation chaque semaine, le {LIBELLES_JOURS[formTontine.jourCotisation]}.
+                </p>
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Nombre max de membres *</label>
@@ -296,6 +414,9 @@ export default function MemberDashboard() {
                   onChange={(e) => setFormTontine({ ...formTontine, nombreMaxMembres: e.target.value })}
                   className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
                 />
+                <p className="mt-1 text-[11px] text-sky-700">
+                  {texteDuree(formTontine.nombreMaxMembres, formTontine.jourCotisation)}
+                </p>
               </div>
               <div className="flex gap-2 pt-2">
                 <button
@@ -351,9 +472,14 @@ export default function MemberDashboard() {
         </div>
       )}
 
-      {/* Section : Rejoindre via code d'invitation */}
+      {/* Section : demander à rejoindre via code d'invitation */}
       <div className="rounded-2xl border border-gray-200 shadow-sm p-4 bg-white space-y-3">
-        <h2 className="text-sm font-semibold text-gray-700">Rejoindre via un code d'invitation</h2>
+        <h2 className="text-sm font-semibold text-gray-700">
+          Demander à rejoindre via un code
+        </h2>
+        <p className="text-xs text-gray-500">
+          L’administrateur de la tontine doit accepter votre demande avant votre entrée effective.
+        </p>
         <div className="flex gap-2">
           <input
             type="text"
@@ -368,10 +494,46 @@ export default function MemberDashboard() {
             disabled={!codeInvitation.trim() || rejoindreParCodeEnCours}
             className="rounded-lg bg-gray-900 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40"
           >
-            {rejoindreParCodeEnCours ? '...' : 'Rejoindre'}
+            {rejoindreParCodeEnCours ? '...' : 'Demander'}
           </button>
         </div>
       </div>
+
+      {/* Suivi des demandes envoyées */}
+      {demandes.length > 0 && (
+        <div className="rounded-2xl border border-gray-200 shadow-sm p-4 bg-white space-y-3">
+          <h2 className="text-sm font-semibold text-gray-700">Mes demandes d’adhésion</h2>
+          {demandes.map((d) => (
+            <div key={d.id} className="rounded-xl border border-gray-100 p-3 space-y-1">
+              <div className="flex justify-between items-start gap-2">
+                <p className="text-sm font-medium text-gray-900">{d.tontine.nom}</p>
+                <span
+                  className={`text-[11px] font-medium px-2 py-1 rounded-full ${
+                    d.statut === 'ACCEPTEE'
+                      ? 'bg-green-100 text-green-700'
+                      : d.statut === 'REFUSEE'
+                        ? 'bg-red-100 text-red-700'
+                        : 'bg-yellow-100 text-yellow-700'
+                  }`}
+                >
+                  {d.statut === 'EN_ATTENTE'
+                    ? 'En attente'
+                    : d.statut === 'ACCEPTEE'
+                      ? 'Acceptée'
+                      : 'Refusée'}
+                </span>
+              </div>
+              <p className="text-xs text-gray-500">
+                Demandée le {new Date(d.createdAt).toLocaleDateString('fr-FR')}
+                {d.statut === 'EN_ATTENTE' && ' · en attente de validation par l’administrateur'}
+              </p>
+              {d.motifRefus && (
+                <p className="text-xs text-red-600">Motif : {d.motifRefus}</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {tontines.length === 0 && (
         <p className="text-gray-500 text-sm">Vous ne participez à aucune tontine pour le moment.</p>
@@ -402,6 +564,20 @@ export default function MemberDashboard() {
             <StatutBadge statut={t.statutCotisation} />
           </div>
 
+          {t.arriere && (
+            <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-700 space-y-1">
+              <p className="font-semibold">Impayé : tour {t.arriere.cycle}</p>
+              <p>
+                {t.arriere.montantTotal.toLocaleString('fr-FR')} FCFA à régler
+                {t.arriere.amende > 0
+                  ? ` (cotisation + ${t.arriere.amende.toLocaleString('fr-FR')} FCFA d'amende)`
+                  : ' (aucune amende pendant le délai de grâce)'}
+                .
+              </p>
+              <p>Vous devez régler cet arriéré avant de payer le tour {t.cycleActuel}.</p>
+            </div>
+          )}
+
           <div className="flex justify-between text-sm">
             <span className="text-gray-500">Cotisation</span>
             <span className="font-medium text-gray-900">
@@ -425,7 +601,7 @@ export default function MemberDashboard() {
             </div>
           )}
 
-          {t.statutCotisation !== 'PAYE' && (
+          {(t.statutCotisation !== 'PAYE' || Boolean(t.arriere)) && (
             <>
               {tontineEnPaiement === t.id ? (
                 <div
@@ -434,6 +610,10 @@ export default function MemberDashboard() {
                   onKeyDown={(e) => e.stopPropagation()}
                 >
                   <p className="text-xs text-gray-500">Choisissez votre moyen de paiement :</p>
+                  <p className="text-xs font-medium text-gray-800">
+                    Montant :{' '}
+                    {(t.arriere?.montantTotal ?? t.montantCotisation).toLocaleString('fr-FR')} FCFA
+                  </p>
                   <div className="flex gap-2">
                     {PROVIDERS.map((p) => (
                       <button
@@ -460,10 +640,13 @@ export default function MemberDashboard() {
                   onClick={(e) => {
                     e.stopPropagation();
                     setTontineEnPaiement(t.id);
+                    setCycleEnPaiement(t.arriere?.cycle ?? null);
                   }}
                   className="w-full rounded-xl bg-gray-900 text-white py-2.5 text-sm font-semibold"
                 >
-                  Payer ma cotisation
+                  {t.arriere
+                    ? `Régler l'arriéré (${t.arriere.montantTotal.toLocaleString('fr-FR')} FCFA)`
+                    : 'Payer ma cotisation'}
                 </button>
               )}
             </>
@@ -498,7 +681,7 @@ export default function MemberDashboard() {
               disabled={rejoindreEnCours === t.id}
               className="w-full rounded-xl bg-gray-900 text-white py-2 text-sm font-semibold disabled:opacity-40"
             >
-              {rejoindreEnCours === t.id ? 'Inscription...' : 'Rejoindre'}
+              {rejoindreEnCours === t.id ? 'Envoi...' : 'Demander à rejoindre'}
             </button>
           </div>
         ))}
@@ -512,11 +695,13 @@ function StatutBadge({ statut }: { statut: TontineResume['statutCotisation'] }) 
     PAYE: 'bg-green-100 text-green-700',
     EN_ATTENTE: 'bg-yellow-100 text-yellow-700',
     EN_RETARD: 'bg-red-100 text-red-700',
+    ARRIERE: 'bg-red-100 text-red-700',
   };
   const labels: Record<typeof statut, string> = {
     PAYE: 'Payé',
     EN_ATTENTE: 'En attente',
     EN_RETARD: 'En retard',
+    ARRIERE: 'Arriéré',
   };
   return (
     <span className={`text-xs font-medium px-2 py-1 rounded-full ${styles[statut]}`}>

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import Navigation from '@/components/Navigation';
+import SupportButton from '@/components/SupportButton';
 
 export const metadata: Metadata = {
   title: 'Tontine SaaS',
@@ -13,6 +14,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <Navigation />
         {children}
+        <SupportButton />
       </body>
     </html>
   );

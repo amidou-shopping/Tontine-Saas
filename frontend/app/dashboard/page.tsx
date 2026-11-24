@@ -9,6 +9,7 @@ export default function DashboardPage() {
   const router = useRouter();
   const [pret, setPret] = useState(false);
   const [prenom, setPrenom] = useState('');
+  const [roleActuel, setRoleActuel] = useState('MEMBER');
 
   useEffect(() => {
     async function verifierAcces() {
@@ -20,6 +21,7 @@ export default function DashboardPage() {
         return;
       }
       setPrenom(profil.prenom ?? '');
+      setRoleActuel(profil.role);
       setPret(true);
     }
     verifierAcces();
@@ -40,7 +42,7 @@ export default function DashboardPage() {
           Déconnexion
         </button>
       </header>
-      <MemberDashboard />
+      <MemberDashboard role={roleActuel} />
     </div>
   );
 }

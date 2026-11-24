@@ -10,6 +10,7 @@ import {
   Controller,
   Get,
   Patch,
+  Post,
   Param,
   UseGuards,
   Query,
@@ -22,7 +23,14 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { AuditService } from '../audit/audit.service';
-import { Role, TransactionType, TransactionStatus } from '@prisma/client';
+import { NotificationsService } from '../notifications/notifications.service';
+import { lireDelaiAvertissementSuppression } from '../common/parametres-financiers';
+import { promouvoirSuperAdminDansTransaction } from '../common/super-admins.util';
+import {
+  Role,
+  TransactionStatus,
+  TransactionType,
+} from '@prisma/client';
 
 @Controller('admin')
 @UseGuards(JwtAuthGuard, RolesGuard) // Authentification + vérification du rôle
@@ -31,6 +39,7 @@ export class AdminController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
@@ -254,6 +263,168 @@ export class AdminController {
     });
     await this.audit.log('USER_UNBLOCKED', user.id, req.user.id);
     return { message: `Utilisateur ${user.email} débloqué avec succès.`, user };
+  }
+
+  /**
+   * POST /admin/users/:id/promouvoir-super-admin
+   * Seule voie d'élévation au rôle SUPER_ADMIN. Réservée au back-office
+   * (garde de classe @Roles(SUPER_ADMIN)) et plafonnée dans une transaction
+   * verrouillée : aucune route publique n'accorde ce rôle (Phase 4).
+   */
+  @Post('users/:id/promouvoir-super-admin')
+  async promouvoirSuperAdmin(@Param('id') id: string, @Req() req: any) {
+    const promu = await this.prisma.$transaction((tx) =>
+      promouvoirSuperAdminDansTransaction(tx, id),
+    );
+
+    await this.audit.log('SUPER_ADMIN_PROMU', promu.id, req.user.id, {
+      email: promu.email,
+      role: promu.role,
+    });
+    await this.notifications.creerNotification(
+      promu.id,
+      'Promotion Super-Admin',
+      'Vous disposez désormais des droits d’administration de la plateforme.',
+      'SUCCESS',
+    );
+
+    return {
+      message: 'L’utilisateur est désormais Super-Admin.',
+      user: promu,
+    };
+  }
+
+  /** GET /admin/tontines — liste de pilotage pour la suppression sécurisée. */
+  @Get('tontines')
+  async listTontines() {
+    return this.prisma.tontine.findMany({
+      include: {
+        createur: { select: { id: true, nom: true, prenom: true, email: true } },
+        _count: { select: { membres: true, transactions: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+  }
+
+  /**
+   * POST /admin/tontines/:id/avertir-suppression
+   * Première étape de la suppression sécurisée : on date l'avertissement et
+   * on prévient le créateur et les membres. Le délai vient des paramètres
+   * plateforme (ou de DELAI_AVERTISSEMENT_SUPPRESSION_JOURS), jamais du code.
+   */
+  @Post('tontines/:id/avertir-suppression')
+  async avertirSuppression(@Param('id') id: string, @Req() req: any) {
+    const tontine = await this.prisma.tontine.findUnique({
+      where: { id },
+      include: { membres: true },
+    });
+    if (!tontine) throw new NotFoundException('Tontine introuvable.');
+
+    const delaiJours = await lireDelaiAvertissementSuppression(this.prisma);
+    let dateAvertissement = tontine.suppressionDemandeeAt;
+    if (!dateAvertissement) {
+      dateAvertissement = new Date();
+      await this.prisma.tontine.update({
+        where: { id },
+        data: { suppressionDemandeeAt: dateAvertissement },
+      });
+
+      const destinataires = new Set([
+        tontine.createurId,
+        ...tontine.membres.map((m) => m.userId),
+      ]);
+      for (const userId of destinataires) {
+        await this.notifications.creerNotification(
+          userId,
+          'Avertissement de suppression',
+          `La tontine « ${tontine.nom} » doit être supprimée. Aucune suppression ne sera effectuée avant ${delaiJours} jours révolus.`,
+          'WARNING',
+        );
+      }
+      await this.audit.log('TONTINE_SUPPRESSION_AVERTIE', id, req.user.id, {
+        delaiJours,
+        dateAvertissement,
+      });
+    }
+
+    const supprimableLe = new Date(
+      dateAvertissement.getTime() + delaiJours * 24 * 60 * 60 * 1000,
+    );
+    return { suppressionDemandeeAt: dateAvertissement, delaiJours, supprimableLe };
+  }
+
+  /**
+   * POST /admin/tontines/:id/supprimer
+   * Deuxième étape : délai écoulé ET aucun montant engagé (transaction réussie,
+   * paiement en attente ou amende). Les données liées sont supprimées dans
+   * une transaction avant la tontine elle-même (clés étrangères RESTRICT).
+   */
+  @Post('tontines/:id/supprimer')
+  async supprimerTontine(@Param('id') id: string, @Req() req: any) {
+    const tontine = await this.prisma.tontine.findUnique({
+      where: { id },
+      include: { membres: true },
+    });
+    if (!tontine) throw new NotFoundException('Tontine introuvable.');
+
+    const delaiJours = await lireDelaiAvertissementSuppression(this.prisma);
+    if (!tontine.suppressionDemandeeAt) {
+      throw new BadRequestException(
+        'Suppression refusée : un avertissement préalable est obligatoire.',
+      );
+    }
+    const supprimableLe = new Date(
+      tontine.suppressionDemandeeAt.getTime() + delaiJours * 24 * 60 * 60 * 1000,
+    );
+    if (Date.now() < supprimableLe.getTime()) {
+      throw new BadRequestException(
+        `Délai de ${delaiJours} jours non écoulé. Suppression possible à partir du ${supprimableLe.toISOString()}.`,
+      );
+    }
+
+    const [transactions, paiementsEnAttente, amendes] = await Promise.all([
+      this.prisma.transaction.count({
+        where: {
+          tontineId: id,
+          statut: { in: [TransactionStatus.EN_ATTENTE, TransactionStatus.REUSSIE] },
+        },
+      }),
+      this.prisma.pendingPayment.count({
+        where: { tontineId: id, statut: 'EN_ATTENTE' },
+      }),
+      this.prisma.amendeRetard.count({ where: { tontineId: id } }),
+    ]);
+    if (transactions > 0 || paiementsEnAttente > 0 || amendes > 0) {
+      throw new BadRequestException(
+        'Suppression refusée : cette tontine a de l’argent engagé (cotisation, versement, paiement en attente ou amende).',
+      );
+    }
+
+    const destinataires = new Set([
+      tontine.createurId,
+      ...tontine.membres.map((m) => m.userId),
+    ]);
+    await this.prisma.$transaction(async (tx) => {
+      await tx.amendeRetard.deleteMany({ where: { tontineId: id } });
+      await tx.pendingPayment.deleteMany({ where: { tontineId: id } });
+      await tx.transaction.deleteMany({ where: { tontineId: id } });
+      await tx.demandeAdhesion.deleteMany({ where: { tontineId: id } });
+      await tx.tontineMember.deleteMany({ where: { tontineId: id } });
+      await tx.tontine.delete({ where: { id } });
+    });
+
+    for (const userId of destinataires) {
+      await this.notifications.creerNotification(
+        userId,
+        'Tontine supprimée',
+        `La tontine « ${tontine.nom} » a été supprimée par l’administration de la plateforme.`,
+        'WARNING',
+      );
+    }
+    await this.audit.log('TONTINE_SUPPRIMEE', id, req.user.id, { nom: tontine.nom });
+
+    return { message: 'Tontine supprimée.' };
   }
 
   /** Construit un filtre Prisma `createdAt` optionnel à partir de dates ISO. */

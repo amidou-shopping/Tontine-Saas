@@ -2,7 +2,28 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { apiFetch, getProfilServeur, enNombre, clearSession } from '@/lib/api';
+import {
+  apiFetch,
+  getProfilServeur,
+  enNombre,
+  clearSession,
+  extraireMessageErreur,
+} from '@/lib/api';
+import { JOURS_SEMAINE, LIBELLES_JOURS, texteDuree, type JourSemaine } from '@/lib/jours-semaine';
+
+interface DemandeEnAttente {
+  id: string;
+  statut: string;
+  createdAt: string;
+  user: { id: string; nom: string; prenom: string; email: string };
+}
+
+interface MembreAdmin {
+  id: string;
+  ordrePassage: number;
+  statut: string;
+  user: { id: string; nom: string; prenom: string; email: string };
+}
 
 interface TontineAdmin {
   id: string;
@@ -15,7 +36,10 @@ interface TontineAdmin {
   cycleActuel: number;
   codeInvitation: string;
   dateDebut: string | null;
-  _count: { membres: number };
+  createurId: string;
+  demandesAdhesion: DemandeEnAttente[];
+  membres: MembreAdmin[];
+  _count: { membres: number; demandesAdhesion?: number };
 }
 
 export default function AdminTontinesPage() {
@@ -24,12 +48,13 @@ export default function AdminTontinesPage() {
   const [loading, setLoading] = useState(true);
   const [modalCreationOuverte, setModalCreationOuverte] = useState(false);
   const [creationEnCours, setCreationEnCours] = useState(false);
+  const [actionEnCours, setActionEnCours] = useState<string | null>(null);
   const [nouvelleTontine, setNouvelleTontine] = useState<{ id: string; nom: string; codeInvitation: string } | null>(null);
   const [formTontine, setFormTontine] = useState({
     nom: '',
     description: '',
     montantCotisation: '',
-    frequence: 'MENSUELLE',
+    jourCotisation: 'LUNDI' as JourSemaine,
     nombreMaxMembres: '10',
   });
 
@@ -78,7 +103,7 @@ export default function AdminTontinesPage() {
           nom: formTontine.nom,
           description: formTontine.description,
           montantCotisation: Number(formTontine.montantCotisation),
-          frequence: formTontine.frequence,
+          jourCotisation: formTontine.jourCotisation,
           nombreMaxMembres: Number(formTontine.nombreMaxMembres),
         }),
       });
@@ -87,7 +112,7 @@ export default function AdminTontinesPage() {
       const data = await res.json();
       setNouvelleTontine(data);
       setModalCreationOuverte(false);
-      setFormTontine({ nom: '', description: '', montantCotisation: '', frequence: 'MENSUELLE', nombreMaxMembres: '10' });
+      setFormTontine({ nom: '', description: '', montantCotisation: '', jourCotisation: 'LUNDI', nombreMaxMembres: '10' });
       chargerTontines();
     } catch (err) {
       console.error(err);
@@ -98,15 +123,65 @@ export default function AdminTontinesPage() {
   }
 
   async function demarrerTontine(id: string) {
-    if (!confirm('Voulez-vous vraiment démarrer cette tontine ? Tous les membres devront cotiser à chaque cycle.')) return;
+    if (!confirm('Voulez-vous vraiment démarrer cette tontine ? L’ordre de passage sera tiré au sort et tous les membres devront cotiser chaque semaine.')) return;
     try {
+      setActionEnCours(id);
       const res = await apiFetch(`/api/tontines/${id}/demarrer`, { method: 'POST' });
-      if (!res.ok) throw new Error('Erreur');
-      alert('Tontine démarrée !');
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(extraireMessageErreur(payload, 'Impossible de démarrer la tontine.'));
+      alert('Tontine démarrée ! L’ordre de passage a été tiré au sort.');
       chargerTontines();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert('Impossible de démarrer la tontine.');
+      alert(err.message || 'Impossible de démarrer la tontine.');
+    } finally {
+      setActionEnCours(null);
+    }
+  }
+
+  /** Accepter ou refuser une demande d'adhésion. */
+  async function traiterDemande(demandeId: string, accepter: boolean) {
+    try {
+      setActionEnCours(demandeId);
+      const motifRefus = accepter
+        ? undefined
+        : prompt('Motif du refus (facultatif) :') ?? undefined;
+      const res = await apiFetch(
+        `/api/tontines/demandes/${demandeId}/${accepter ? 'accepter' : 'refuser'}`,
+        {
+          method: 'POST',
+          ...(accepter ? {} : { body: JSON.stringify({ motifRefus }) }),
+        },
+      );
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(extraireMessageErreur(payload, 'Impossible de traiter la demande.'));
+      alert(extraireMessageErreur(payload, accepter ? 'Demande acceptée.' : 'Demande refusée.'));
+      chargerTontines();
+    } catch (err: any) {
+      console.error(err);
+      alert(err.message || 'Impossible de traiter la demande.');
+    } finally {
+      setActionEnCours(null);
+    }
+  }
+
+  /** Exclut un membre ; le net réglé est remboursé à la clôture. */
+  async function exclureMembre(tontineId: string, userId: string, nom: string) {
+    if (!confirm(`Exclure ${nom} de cette tontine ? Les sommes réglées lui seront remboursées à la clôture.`)) return;
+    try {
+      setActionEnCours(userId);
+      const res = await apiFetch(`/api/tontines/${tontineId}/membres/${userId}/exclure`, {
+        method: 'POST',
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(extraireMessageErreur(payload, 'Impossible d’exclure le membre.'));
+      alert(extraireMessageErreur(payload, 'Membre exclu.'));
+      chargerTontines();
+    } catch (err: any) {
+      console.error(err);
+      alert(err.message || 'Impossible d’exclure le membre.');
+    } finally {
+      setActionEnCours(null);
     }
   }
 
@@ -170,15 +245,19 @@ export default function AdminTontinesPage() {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Fréquence *</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Jour de cotisation *</label>
                 <select
-                  value={formTontine.frequence}
-                  onChange={(e) => setFormTontine({ ...formTontine, frequence: e.target.value })}
+                  value={formTontine.jourCotisation}
+                  onChange={(e) =>
+                    setFormTontine({ ...formTontine, jourCotisation: e.target.value as JourSemaine })
+                  }
                   className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
                 >
-                  <option value="QUOTIDIENNE">Quotidienne</option>
-                  <option value="HEBDOMADAIRE">Hebdomadaire</option>
-                  <option value="MENSUELLE">Mensuelle</option>
+                  {JOURS_SEMAINE.map((jour) => (
+                    <option key={jour} value={jour}>
+                      {LIBELLES_JOURS[jour][0].toUpperCase() + LIBELLES_JOURS[jour].slice(1)}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
@@ -192,6 +271,9 @@ export default function AdminTontinesPage() {
                   onChange={(e) => setFormTontine({ ...formTontine, nombreMaxMembres: e.target.value })}
                   className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
                 />
+                <p className="mt-1 text-[11px] text-sky-700">
+                  {texteDuree(formTontine.nombreMaxMembres, formTontine.jourCotisation)}
+                </p>
               </div>
               <div className="flex gap-2 pt-2">
                 <button
@@ -279,12 +361,84 @@ export default function AdminTontinesPage() {
               <p className="text-sm font-mono font-bold text-sky-600">{t.codeInvitation}</p>
             </div>
 
+            {/* Demandes d'adhésion à traiter */}
+            {(t.demandesAdhesion ?? []).length > 0 && (
+              <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
+                <p className="text-xs font-semibold text-amber-900">
+                  Demandes en attente ({t.demandesAdhesion.length})
+                </p>
+                {t.demandesAdhesion.map((d) => (
+                  <div
+                    key={d.id}
+                    className="rounded-lg bg-white border border-amber-100 p-2 space-y-2"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">
+                        {d.user.prenom} {d.user.nom}
+                      </p>
+                      <p className="text-[11px] text-gray-500">{d.user.email}</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => traiterDemande(d.id, true)}
+                        disabled={actionEnCours === d.id}
+                        className="flex-1 rounded-lg bg-green-600 text-white py-1.5 text-xs font-semibold disabled:opacity-40"
+                      >
+                        Accepter
+                      </button>
+                      <button
+                        onClick={() => traiterDemande(d.id, false)}
+                        disabled={actionEnCours === d.id}
+                        className="flex-1 rounded-lg border border-red-200 text-red-700 py-1.5 text-xs font-semibold disabled:opacity-40"
+                      >
+                        Refuser
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Membres et exclusion */}
+            {(t.membres ?? []).length > 0 && (
+              <div className="space-y-1 rounded-xl border border-gray-200 p-3">
+                <p className="text-xs font-semibold text-gray-700">Membres</p>
+                {t.membres.map((m) => (
+                  <div
+                    key={m.id}
+                    className="flex items-center justify-between gap-2 text-xs py-1"
+                  >
+                    <span className="text-gray-700">
+                      #{m.ordrePassage} · {m.user.prenom} {m.user.nom}
+                      {m.statut !== 'ACTIF' && ` (${m.statut})`}
+                    </span>
+                    {m.user.id !== t.createurId && m.statut !== 'EXCLU' && (
+                      <button
+                        onClick={() =>
+                          exclureMembre(
+                            t.id,
+                            m.user.id,
+                            `${m.user.prenom} ${m.user.nom}`,
+                          )
+                        }
+                        disabled={actionEnCours === m.user.id}
+                        className="text-[11px] text-red-600 underline disabled:opacity-40"
+                      >
+                        Exclure
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
             {t.statut === 'EN_ATTENTE' && t._count.membres >= t.nombreMaxMembres && (
               <button
                 onClick={() => demarrerTontine(t.id)}
-                className="w-full rounded-xl bg-green-600 text-white py-2 text-sm font-semibold hover:bg-green-700"
+                disabled={actionEnCours === t.id}
+                className="w-full rounded-xl bg-green-600 text-white py-2 text-sm font-semibold hover:bg-green-700 disabled:opacity-40"
               >
-                Démarrer la tontine
+                Démarrer la tontine (tirage au sort)
               </button>
             )}
           </div>

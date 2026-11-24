@@ -14,8 +14,18 @@ import {
 import { Prisma } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { PrismaService } from '../prisma/prisma.service';
+import { AuditService } from '../audit/audit.service';
 import { PaymentsService } from '../payments/payments.service';
-import { TontineFrequency, TontineStatus, TransactionStatus, TransactionType } from '@prisma/client';
+import { TontinesService } from '../tontines/tontines.service';
+import {
+  PlanAbonnement,
+  Role,
+  TontineStatus,
+  TransactionStatus,
+  TransactionType,
+} from '@prisma/client';
+import { dateDuTour, semaineSuivante } from '../common/dates.util';
+import { lireContactsSupport } from '../common/contacts-support.util';
 import { PayerCotisationDto, UpdateProfilDto } from './dto/member.dto';
 
 @Controller('member')
@@ -24,7 +34,63 @@ export class MemberController {
   constructor(
     private prisma: PrismaService,
     private paymentsService: PaymentsService,
+    private tontinesService: TontinesService,
+    private audit: AuditService,
   ) {}
+
+  /**
+   * POST /member/devenir-admin
+   * Passage explicite MEMBER -> ADMIN_TONTINE. Aucun appelant ne peut obtenir
+   * le rôle SUPER_ADMIN : celui-ci reste réservé au back-office/seed.
+   */
+  @Post('devenir-admin')
+  async devenirAdmin(@Req() req: any) {
+    const utilisateur = await this.prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!utilisateur) throw new NotFoundException('Utilisateur introuvable.');
+    if (utilisateur.role !== Role.MEMBER) {
+      throw new ConflictException('Vous êtes déjà administrateur de tontine.');
+    }
+
+    const admin = await this.prisma.$transaction(async (tx) => {
+      const misAJour = await tx.user.update({
+        where: { id: utilisateur.id },
+        data: { role: Role.ADMIN_TONTINE },
+        select: { id: true, role: true },
+      });
+      // Offre un point d'entrée gratuit ; la grille tarifaire évoluera en Phase 6.
+      await tx.subscription.upsert({
+        where: { userId: utilisateur.id },
+        update: { actif: true },
+        create: {
+          userId: utilisateur.id,
+          plan: PlanAbonnement.GRATUIT,
+          prixMensuel: 0,
+          actif: true,
+        },
+      });
+      return misAJour;
+    });
+
+    await this.audit.log('DEVENIR_ADMIN', admin.id, admin.id, {
+      role: Role.ADMIN_TONTINE,
+    });
+    return {
+      message: 'Vous êtes désormais administrateur de tontine.',
+      role: admin.role,
+    };
+  }
+
+  /** GET /member/demandes — suivi des demandes envoyées par l'utilisateur. */
+  @Get('demandes')
+  async mesDemandes(@Req() req: any) {
+    return this.prisma.demandeAdhesion.findMany({
+      where: { userId: req.user.id },
+      include: {
+        tontine: { select: { id: true, nom: true, codeInvitation: true, statut: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
 
   /**
    * GET /member/tontines
@@ -48,6 +114,8 @@ export class MemberController {
           },
         });
 
+        const etat = await this.tontinesService.etatPaiement(m.tontine.id, req.user.id);
+
         return {
           id: m.tontine.id,
           nom: m.tontine.nom,
@@ -56,12 +124,24 @@ export class MemberController {
           frequence: m.tontine.frequence,
           prochainEcheance: this.calculerProchaineEcheance(
             m.tontine.dateDebut,
-            m.tontine.frequence,
             m.tontine.cycleActuel,
           ),
           monTour: m.ordrePassage,
           cycleActuel: m.tontine.cycleActuel,
-          statutCotisation: cotisationPayee ? 'PAYE' : 'EN_ATTENTE',
+          statutCotisation: etat.arriere
+            ? 'ARRIERE'
+            : cotisationPayee
+              ? 'PAYE'
+              : 'EN_ATTENTE',
+          arriere: etat.arriere
+            ? {
+                cycle: etat.arriere.cycle,
+                cotisationDue: etat.arriere.cotisationDue,
+                amende: etat.arriere.amende,
+                montantTotal: etat.arriere.montantTotal,
+                dateEcheance: etat.arriere.dateEcheance,
+              }
+            : null,
           codeInvitation: m.tontine.codeInvitation,
         };
       }),
@@ -118,6 +198,16 @@ export class MemberController {
       tontineNom: t.tontine?.nom,
       createdAt: t.createdAt,
     }));
+  }
+
+  /**
+   * GET /member/support-contacts
+   * Route protégée par le JwtAuthGuard de classe. Les liens WhatsApp sont
+   * construits côté serveur avec l'identifiant issu du JWT (jamais du client).
+   */
+  @Get('support-contacts')
+  getSupportContacts(@Req() req: any) {
+    return { contacts: lireContactsSupport(req.user.id) };
   }
 
   /** GET /member/profil */
@@ -224,26 +314,17 @@ export class MemberController {
       req.user.id,
       dto.provider,
       req.user.telephone,
+      dto.cycleConcerne,
     );
   }
 
+  /** Échéance du tour en cours, décalée aux semaines suivantes si elle est passée. */
   private calculerProchaineEcheance(
     dateDebut: Date | null,
-    frequence: TontineFrequency,
     cycleActuel: number,
   ): Date {
-    const echeance = new Date(dateDebut ?? Date.now());
-    for (let tour = 1; tour < Math.max(1, cycleActuel); tour++) {
-      this.ajouterPeriode(echeance, frequence);
-    }
-    // S'il y a eu du retard, on affiche toujours la prochaine échéance future.
-    while (echeance.getTime() <= Date.now()) this.ajouterPeriode(echeance, frequence);
+    let echeance = dateDuTour(dateDebut ?? new Date(), Math.max(1, cycleActuel));
+    while (echeance.getTime() <= Date.now()) echeance = semaineSuivante(echeance);
     return echeance;
-  }
-
-  private ajouterPeriode(date: Date, frequence: TontineFrequency) {
-    if (frequence === TontineFrequency.QUOTIDIENNE) date.setDate(date.getDate() + 1);
-    else if (frequence === TontineFrequency.HEBDOMADAIRE) date.setDate(date.getDate() + 7);
-    else date.setMonth(date.getMonth() + 1);
   }
 }
