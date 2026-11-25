@@ -9,6 +9,7 @@
  *   TAUX_AMENDE_RETARD           ex: 0.10
  *   DELAI_GRACE_HEURES           ex: 24
  *   DELAI_AVERTISSEMENT_SUPPRESSION_JOURS  ex: 7 (suppression sécurisée)
+ *   FRAIS_PASSAGE_ADMIN                   ex: 1000 (FCFA entiers, passage Admin)
  *
  * Aucun taux n'est codé en dur ici : les valeurs par défaut sont portées par
  * la migration datée, et les tests passent explicitement leurs paramètres.
@@ -70,4 +71,28 @@ export async function lireDelaiAvertissementSuppression(
   }
   return nombreEnv('DELAI_AVERTISSEMENT_SUPPRESSION_JOURS') ??
     parametres.delaiAvertissementSuppressionJours;
+}
+
+/**
+ * Frais uniques de passage MEMBER -> ADMIN_TONTINE. Montant entier en FCFA,
+ * lu dans la table singleton et surchargeable par FRAIS_PASSAGE_ADMIN.
+ */
+export async function lireFraisPassageAdmin(
+  client: Prisma.TransactionClient | PrismaService,
+): Promise<number> {
+  const parametres = await client.parametresPlateforme.findUnique({
+    where: { cle: 'global' },
+    select: { fraisPassageAdminFcfa: true },
+  });
+  if (!parametres) {
+    throw new Error(
+      'Paramètres plateforme introuvables : appliquez la migration 20261125140000_passage_admin_paye.',
+    );
+  }
+
+  const surcharge = nombreEnv('FRAIS_PASSAGE_ADMIN');
+  if (surcharge !== undefined && (!Number.isInteger(surcharge) || surcharge <= 0)) {
+    throw new Error('FRAIS_PASSAGE_ADMIN doit être un entier positif (FCFA).');
+  }
+  return surcharge ?? parametres.fraisPassageAdminFcfa;
 }

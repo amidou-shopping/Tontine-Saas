@@ -151,20 +151,35 @@ export class TontinesService {
 
     const parametres = await lireParametresFinanciers(this.prisma);
     const codeInvitation = randomBytes(4).toString('hex').toUpperCase(); // 8 caractères hex
-    const tontine = await this.prisma.tontine.create({
-      data: {
-        nom: dto.nom,
-        description: dto.description,
-        type: dto.type ?? TontineType.CLASSIQUE,
-        montantCotisation: dto.montantCotisation,
-        // Nouveau modèle : une cotisation par semaine, au jour choisi.
-        frequence: TontineFrequency.HEBDOMADAIRE,
-        jourCotisation: dto.jourCotisation ?? JourSemaine.LUNDI,
-        nombreMaxMembres: dto.nombreMaxMembres,
-        tauxCommission: parametres.tauxCommission,
-        createurId,
-        codeInvitation,
-      },
+
+    // La tontine et la participation du créateur sont indivisibles : soit les
+    // deux existent, soit aucune n'est créée. Le rang 1 est temporaire : le
+    // véritable ordre de passage est tiré au sort au démarrage.
+    const tontine = await this.prisma.$transaction(async (tx) => {
+      const creee = await tx.tontine.create({
+        data: {
+          nom: dto.nom,
+          description: dto.description,
+          type: dto.type ?? TontineType.CLASSIQUE,
+          montantCotisation: dto.montantCotisation,
+          // Nouveau modèle : une cotisation par semaine, au jour choisi.
+          frequence: TontineFrequency.HEBDOMADAIRE,
+          jourCotisation: dto.jourCotisation ?? JourSemaine.LUNDI,
+          nombreMaxMembres: dto.nombreMaxMembres,
+          tauxCommission: parametres.tauxCommission,
+          createurId,
+          codeInvitation,
+        },
+      });
+      await tx.tontineMember.create({
+        data: {
+          tontineId: creee.id,
+          userId: createurId,
+          ordrePassage: 1,
+          statut: MemberStatus.ACTIF,
+        },
+      });
+      return creee;
     });
 
     await this.audit.log('TONTINE_CREEE', tontine.id, createurId, {
@@ -207,6 +222,14 @@ export class TontinesService {
     if (tontine.membres.length >= tontine.nombreMaxMembres) {
       throw new BadRequestException('Cette tontine est complète.');
     }
+    // Le créateur est membre d'office depuis la création : il ne doit jamais
+    // apparaître comme demandeur, y compris via un lien d'invitation ou un
+    // appel direct à l'API.
+    if (tontine.createurId === userId) {
+      throw new BadRequestException(
+        'Vous êtes le créateur de cette tontine : vous êtes déjà membre et participez au tirage. Aucune demande d’adhésion n’est nécessaire.',
+      );
+    }
     if (tontine.membres.some((m) => m.userId === userId)) {
       throw new ConflictException('Vous êtes déjà inscrit(e) dans cette tontine.');
     }
@@ -230,6 +253,7 @@ export class TontinesService {
       'Nouvelle demande d’adhésion',
       `Un membre souhaite rejoindre « ${tontine.nom} ». Acceptez ou refusez sa demande depuis la gestion des tontines.`,
       'INFO',
+      `/admin-tontines?tontineId=${encodeURIComponent(tontine.id)}&demandeId=${encodeURIComponent(demande.id)}`,
     );
 
     return {
@@ -240,11 +264,42 @@ export class TontinesService {
     };
   }
 
+  /**
+   * Ouvre une demande depuis une notification. Seul le créateur de la tontine
+   * peut la consulter : un Super-Admin qui n'est pas créateur est refusé.
+   */
+  async lireDemande(demandeId: string, adminId: string) {
+    const demande = await this.prisma.demandeAdhesion.findUnique({
+      where: { id: demandeId },
+      include: {
+        tontine: true,
+        user: { select: { id: true, nom: true, prenom: true, email: true } },
+      },
+    });
+    if (!demande) throw new NotFoundException('Demande introuvable.');
+    await this.verifierPropriete(demande.tontine, adminId);
+
+    const dejaTraitee = demande.statut !== StatutDemandeAdhesion.EN_ATTENTE;
+    const statutLibelle =
+      demande.statut === StatutDemandeAdhesion.ACCEPTEE ? 'acceptée' : 'refusée';
+    const dateTraitement = demande.traiteeAt
+      ? ` le ${demande.traiteeAt.toISOString().slice(0, 10)}`
+      : '';
+
+    return {
+      ...demande,
+      dejaTraitee,
+      message: dejaTraitee
+        ? `Cette demande a déjà été ${statutLibelle}${dateTraitement}. Elle n'est plus modifiable.`
+        : `Demande en attente pour « ${demande.tontine.nom} ». Vous pouvez l'accepter ou la refuser.`,
+    };
+  }
+
   /** Toutes les demandes d'une tontine, pour son administrateur. */
-  async listerDemandes(tontineId: string, adminId: string, estSuperAdmin = false) {
+  async listerDemandes(tontineId: string, adminId: string) {
     const tontine = await this.prisma.tontine.findUnique({ where: { id: tontineId } });
     if (!tontine) throw new NotFoundException('Tontine introuvable.');
-    await this.verifierPropriete(tontine, adminId, estSuperAdmin);
+    await this.verifierPropriete(tontine, adminId);
 
     return this.prisma.demandeAdhesion.findMany({
       where: { tontineId },
@@ -265,7 +320,6 @@ export class TontinesService {
     adminId: string,
     accepter: boolean,
     motifRefus?: string,
-    estSuperAdmin = false,
   ) {
     const resultat = await this.prisma.$transaction(async (tx) => {
       const demande = await tx.demandeAdhesion.findUnique({
@@ -280,10 +334,17 @@ export class TontinesService {
         include: { membres: true },
       });
       if (!tontine) throw new NotFoundException('Tontine introuvable.');
-      await this.verifierPropriete(tontine, adminId, estSuperAdmin);
+      await this.verifierPropriete(tontine, adminId);
 
       if (demande.statut !== StatutDemandeAdhesion.EN_ATTENTE) {
-        throw new ConflictException('Cette demande a déjà été traitée.');
+        const statutLibelle =
+          demande.statut === StatutDemandeAdhesion.ACCEPTEE ? 'acceptée' : 'refusée';
+        const dateTraitement = demande.traiteeAt
+          ? ` le ${demande.traiteeAt.toISOString().slice(0, 10)}`
+          : '';
+        throw new ConflictException(
+          `Cette demande a déjà été ${statutLibelle}${dateTraitement}. Elle n'est plus modifiable.`,
+        );
       }
 
       if (!accepter) {

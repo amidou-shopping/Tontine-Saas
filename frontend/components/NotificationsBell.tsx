@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { apiFetch, extraireMessageErreur, getToken } from '@/lib/api';
 
 interface NotificationMembre {
@@ -8,6 +9,8 @@ interface NotificationMembre {
   titre?: string;
   message?: string;
   contenu?: string;
+  /** Lien interne vers la page concernée (ex: gestion d'une demande). */
+  lien?: string | null;
   createdAt: string;
   isLu?: boolean;
   lu?: boolean;
@@ -20,6 +23,7 @@ function estLue(notification: NotificationMembre) {
 }
 
 export default function NotificationsBell() {
+  const router = useRouter();
   const [notifications, setNotifications] = useState<NotificationMembre[]>([]);
   const [ouverte, setOuverte] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -80,7 +84,7 @@ export default function NotificationsBell() {
 
   const nonLues = notifications.filter((n) => !estLue(n)).length;
 
-  async function marquerCommeLu(notification: NotificationMembre) {
+  async function marquerCommeLu(notification: NotificationMembre): Promise<boolean> {
     setMarquageEnCours(notification.id);
     setErreur(null);
     try {
@@ -90,7 +94,7 @@ export default function NotificationsBell() {
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setErreur(extraireMessageErreur(data, 'Impossible de marquer cette notification comme lue.'));
-        return;
+        return false;
       }
       // Mise à jour locale immédiate : inutile de recharger toute la liste.
       setNotifications((prev) =>
@@ -100,12 +104,27 @@ export default function NotificationsBell() {
             : n,
         ),
       );
+      return true;
     } catch (err) {
       console.error(err);
       setErreur('Une erreur est survenue. Réessayez.');
+      return false;
     } finally {
       setMarquageEnCours(null);
     }
+  }
+
+  /** Clic sur une notification liée : marquée comme lue puis ouverture de la page. */
+  async function ouvrirNotification(notification: NotificationMembre) {
+    const lien = notification.lien;
+    if (!lien) return;
+    setErreur(null);
+    if (!estLue(notification)) {
+      const marque = await marquerCommeLu(notification);
+      if (!marque) return; // on n'ouvre pas la cible si le marquage a échoué
+    }
+    setOuverte(false);
+    router.push(lien);
   }
 
   return (
@@ -162,20 +181,40 @@ export default function NotificationsBell() {
 
             {!loading && !erreur && notifications.map((n) => {
               const lue = estLue(n);
+              const contenu = (
+                <>
+                  {n.titre && <p className="text-sm font-semibold text-gray-900">{n.titre}</p>}
+                  <p className="text-xs text-gray-600 whitespace-pre-line">
+                    {n.message ?? n.contenu ?? ''}
+                  </p>
+                </>
+              );
               return (
                 <div
                   key={n.id}
                   className={`border-b border-gray-100 px-4 py-3 last:border-0 ${lue ? '' : 'bg-sky-50/50'}`}
                 >
-                  {n.titre && <p className="text-sm font-semibold text-gray-900">{n.titre}</p>}
-                  <p className="text-xs text-gray-600 whitespace-pre-line">
-                    {n.message ?? n.contenu ?? ''}
-                  </p>
+                  {n.lien ? (
+                    <button
+                      type="button"
+                      disabled={marquageEnCours === n.id}
+                      onClick={() => ouvrirNotification(n)}
+                      className="w-full text-left disabled:opacity-60"
+                    >
+                      {contenu}
+                    </button>
+                  ) : (
+                    <div>{contenu}</div>
+                  )}
                   <div className="mt-2 flex items-center justify-between gap-2">
                     <span className="text-[11px] text-gray-400">
                       {n.createdAt ? new Date(n.createdAt).toLocaleString('fr-FR') : ''}
                     </span>
-                    {!lue && (
+                    {n.lien ? (
+                      <span className="text-[11px] font-semibold text-sky-600">
+                        {marquageEnCours === n.id ? 'Ouverture...' : 'Ouvrir →'}
+                      </span>
+                    ) : !lue ? (
                       <button
                         type="button"
                         disabled={marquageEnCours === n.id}
@@ -184,7 +223,7 @@ export default function NotificationsBell() {
                       >
                         {marquageEnCours === n.id ? '...' : 'Marquer comme lu'}
                       </button>
-                    )}
+                    ) : null}
                   </div>
                 </div>
               );

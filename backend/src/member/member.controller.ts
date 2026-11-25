@@ -17,16 +17,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { PaymentsService } from '../payments/payments.service';
 import { TontinesService } from '../tontines/tontines.service';
-import {
-  PlanAbonnement,
-  Role,
-  TontineStatus,
-  TransactionStatus,
-  TransactionType,
-} from '@prisma/client';
+import { TontineStatus, TransactionStatus, TransactionType } from '@prisma/client';
 import { dateDuTour, semaineSuivante } from '../common/dates.util';
 import { lireContactsSupport } from '../common/contacts-support.util';
 import { PayerCotisationDto, UpdateProfilDto } from './dto/member.dto';
+import { ConfirmerPassageAdminDto, InitierPassageAdminDto } from './dto/passage-admin.dto';
+import { lireFraisPassageAdmin } from '../common/parametres-financiers';
 
 @Controller('member')
 @UseGuards(JwtAuthGuard)
@@ -38,46 +34,28 @@ export class MemberController {
     private audit: AuditService,
   ) {}
 
+  /** GET /member/devenir-admin/tarif — prix affiché avant acceptation. */
+  @Get('devenir-admin/tarif')
+  async tarifDevenirAdmin() {
+    return { fraisPassageAdminFcfa: await lireFraisPassageAdmin(this.prisma) };
+  }
+
   /**
-   * POST /member/devenir-admin
-   * Passage explicite MEMBER -> ADMIN_TONTINE. Aucun appelant ne peut obtenir
-   * le rôle SUPER_ADMIN : celui-ci reste réservé au back-office/seed.
+   * POST /member/devenir-admin — initie le paiement (simulation conservée).
+   * Le rôle reste MEMBER tant que le paiement n'est pas confirmé.
    */
   @Post('devenir-admin')
-  async devenirAdmin(@Req() req: any) {
-    const utilisateur = await this.prisma.user.findUnique({ where: { id: req.user.id } });
-    if (!utilisateur) throw new NotFoundException('Utilisateur introuvable.');
-    if (utilisateur.role !== Role.MEMBER) {
-      throw new ConflictException('Vous êtes déjà administrateur de tontine.');
-    }
+  async devenirAdmin(@Body() dto: InitierPassageAdminDto, @Req() req: any) {
+    return this.paymentsService.initierPassageAdmin(req.user.id, dto.provider, dto.telephone);
+  }
 
-    const admin = await this.prisma.$transaction(async (tx) => {
-      const misAJour = await tx.user.update({
-        where: { id: utilisateur.id },
-        data: { role: Role.ADMIN_TONTINE },
-        select: { id: true, role: true },
-      });
-      // Offre un point d'entrée gratuit ; la grille tarifaire évoluera en Phase 6.
-      await tx.subscription.upsert({
-        where: { userId: utilisateur.id },
-        update: { actif: true },
-        create: {
-          userId: utilisateur.id,
-          plan: PlanAbonnement.GRATUIT,
-          prixMensuel: 0,
-          actif: true,
-        },
-      });
-      return misAJour;
-    });
-
-    await this.audit.log('DEVENIR_ADMIN', admin.id, admin.id, {
-      role: Role.ADMIN_TONTINE,
-    });
-    return {
-      message: 'Vous êtes désormais administrateur de tontine.',
-      role: admin.role,
-    };
+  /**
+   * POST /member/devenir-admin/confirmer — même sortie que le webhook réel.
+   * Aucun nouveau paiement n'est créé si la confirmation est rejouée.
+   */
+  @Post('devenir-admin/confirmer')
+  async confirmerDevenirAdmin(@Body() dto: ConfirmerPassageAdminDto, @Req() req: any) {
+    return this.paymentsService.confirmerPassageAdmin(req.user.id, dto.referenceInterne);
   }
 
   /** GET /member/demandes — suivi des demandes envoyées par l'utilisateur. */

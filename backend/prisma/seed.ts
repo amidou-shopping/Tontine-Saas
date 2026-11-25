@@ -5,13 +5,20 @@
  * Lancer avec : npm run prisma:seed
  */
 import { PrismaClient, Role, TontineType, TontineFrequency, TontineStatus, JourSemaine } from '@prisma/client';
+import { randomInt } from 'crypto';
 import * as bcrypt from 'bcryptjs';
 import {
+  creerSuperAdminDepuisSeedOuCli,
+  lireEmailPrincipalEnv,
   peutSeederCompteDemo,
-  promouvoirSuperAdminDansTransaction,
 } from '../src/common/super-admins.util';
 
 const prisma = new PrismaClient();
+
+/** Téléphone unique pour les comptes créés par le seed (évite les collisions). */
+function telephoneAleatoire(): string {
+  return `+22177${String(randomInt(0, 1e9)).padStart(9, '0')}`;
+}
 
 async function main() {
   // Le compte démo a un email et un mot de passe publics : il ne doit jamais
@@ -24,15 +31,19 @@ async function main() {
 
   const motDePasseHash = await bcrypt.hash('Password123!', 12);
 
-  // Phase 4 : la création du SUPER_ADMIN de démo passe par la même règle que
-  // le back-office : transaction + verrou + plafond configurable.
+  // Point 4 : le SUPER_ADMIN principal est désigné par
+  // SUPER_ADMIN_PRINCIPAL_EMAIL. Fallback démo pour un seed local sans .env.
+  // Création transactionnelle : verrou + plafond (3 par défaut) + unicité du
+  // principal, exactement comme pour le CLI. Aucune route HTTP ne peut faire
+  // cela.
+  const emailPrincipal = lireEmailPrincipalEnv() ?? 'admin@tontine.sn';
   const superAdmin = await prisma.$transaction(async (tx) => {
-    let compte = await tx.user.findUnique({ where: { email: 'admin@tontine.sn' } });
+    let compte = await tx.user.findUnique({ where: { email: emailPrincipal } });
     if (!compte) {
       compte = await tx.user.create({
         data: {
-          email: 'admin@tontine.sn',
-          telephone: '+221770000001',
+          email: emailPrincipal,
+          telephone: telephoneAleatoire(),
           passwordHash: motDePasseHash,
           nom: 'Diop',
           prenom: 'Fatou',
@@ -41,11 +52,42 @@ async function main() {
         },
       });
     }
-    if (compte.role === Role.SUPER_ADMIN) {
-      return { id: compte.id, email: compte.email, role: compte.role };
-    }
-    return promouvoirSuperAdminDansTransaction(tx, compte.id);
+    return creerSuperAdminDepuisSeedOuCli(tx, {
+      utilisateurId: compte.id,
+      estPrincipal: true,
+      origine: 'SEED',
+    });
   });
+
+  // SUPER_ADMIN_EMAILS (optionnel) permet de créer les 2 autres comptes max.
+  // Le plafond est vérifié dans la transaction de chaque compte.
+  const emailsSupplementaires = (process.env.SUPER_ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter((email) => email.length > 0 && email !== superAdmin.email);
+  for (const email of emailsSupplementaires) {
+    await prisma.$transaction(async (tx) => {
+      let compte = await tx.user.findUnique({ where: { email } });
+      if (!compte) {
+        compte = await tx.user.create({
+          data: {
+            email,
+            telephone: telephoneAleatoire(),
+            passwordHash: motDePasseHash,
+            nom: 'Admin',
+            prenom: 'Plateforme',
+            role: Role.MEMBER,
+            isVerified: true,
+          },
+        });
+      }
+      await creerSuperAdminDepuisSeedOuCli(tx, {
+        utilisateurId: compte.id,
+        estPrincipal: false,
+        origine: 'SEED',
+      });
+    });
+  }
 
   const creatrice = await prisma.user.upsert({
     where: { email: 'aissatou@example.com' },

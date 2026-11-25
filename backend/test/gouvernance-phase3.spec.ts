@@ -37,9 +37,31 @@ const service = new TontinesService(
   notifications as any,
   audit as any,
 );
+/**
+ * Le vrai flux payant est testé dans passage-admin.spec.ts. Ici on vérifie
+ * simplement que le contrôleur n'accorde le rôle qu'après confirmation.
+ */
+const paiements = {
+  initierPassageAdmin: jest.fn(async () => ({
+    referenceInterne: 'passage-admin-ref-test',
+    montant: 1000,
+  })),
+  confirmerPassageAdmin: jest.fn(async (userId: string, _reference?: string) => {
+    await prisma.user.update({
+      where: { id: userId },
+      data: { role: Role.ADMIN_TONTINE },
+    });
+    await prisma.subscription.upsert({
+      where: { userId },
+      update: { actif: true },
+      create: { userId, plan: PlanAbonnement.GRATUIT, prixMensuel: 0, actif: true },
+    });
+    return { role: Role.ADMIN_TONTINE, message: 'Paiement confirmé.' };
+  }),
+};
 const memberController = new MemberController(
   prisma as any,
-  {} as any,
+  paiements as any,
   service,
   audit as any,
 );
@@ -146,20 +168,33 @@ describe('rôles et gouvernance (Phase 3)', () => {
     ).rejects.toThrow(/Devenir Admin/);
   });
 
-  it('permet le passage explicite MEMBER -> ADMIN_TONTINE sans jamais accorder SUPER_ADMIN', async () => {
+  it('ne change le rôle qu’après confirmation du paiement, jamais en SUPER_ADMIN', async () => {
     const member = await creerUtilisateur(Role.MEMBER);
-    const resultat = await memberController.devenirAdmin({ user: { id: member.id } });
+    const req = { user: { id: member.id } };
 
-    expect(resultat.role).toBe(Role.ADMIN_TONTINE);
+    const initiation = await memberController.devenirAdmin(
+      { provider: PaymentProvider.WAVE } as any,
+      req,
+    );
+    expect(initiation.referenceInterne).toBe('passage-admin-ref-test');
+    const avantConfirmation = await prisma.user.findUnique({ where: { id: member.id } });
+    expect(avantConfirmation?.role).toBe(Role.MEMBER);
+
+    const confirmation = await memberController.confirmerDevenirAdmin(
+      { referenceInterne: 'passage-admin-ref-test' } as any,
+      req,
+    );
+    expect(confirmation.role).toBe(Role.ADMIN_TONTINE);
     const apres = await prisma.user.findUnique({ where: { id: member.id } });
     expect(apres?.role).toBe(Role.ADMIN_TONTINE);
 
     const abonnement = await prisma.subscription.findUnique({ where: { userId: member.id } });
     expect(abonnement?.plan).toBe(PlanAbonnement.GRATUIT);
     expect(Number(abonnement?.prixMensuel)).toBe(0);
-    expect(audit.log).toHaveBeenCalledWith('DEVENIR_ADMIN', member.id, member.id, {
-      role: Role.ADMIN_TONTINE,
-    });
+    expect(paiements.confirmerPassageAdmin).toHaveBeenCalledWith(
+      member.id,
+      'passage-admin-ref-test',
+    );
   });
 });
 

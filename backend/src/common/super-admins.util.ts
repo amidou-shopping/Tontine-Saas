@@ -1,14 +1,24 @@
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma, Role } from '@prisma/client';
 
 /**
- * Phase 4 — Gouvernance des SUPER_ADMIN.
+ * Point 4 — Gouvernance des SUPER_ADMIN.
+ *
+ * Il n'existe AUCUNE route, aucun DTO et aucun raccourci serveur pour élever
+ * un compte en SUPER_ADMIN. La seule voie est le seed ou un script CLI lancé
+ * hors du serveur,via `creerSuperAdminDepuisSeedOuCli()`.
  *
  * Le plafond n'est jamais codé en dur : il est porté par ParametresPlateforme
  * (migration 20261124090000_plafond_super_admins) et peut être surchargé par
- * MAX_SUPER_ADMINS. Toutes les promotions (back-office ET seed) passent par la
- * même fonction, exécutée dans une transaction avec verrou advisory, afin
- * qu'aucune promotion concurrente ne puisse dépasser le plafond.
+ * MAX_SUPER_ADMINS. La création est exécutée dans une transaction verrouillée
+ * afin que deux créations concurrentes ne puissent jamais dépasser le plafond.
+ * Un seul compte peut être principal (index unique partiel en base + contrôle
+ * transactionnel ci-dessous).
  */
 
 /** Surcharge éventuelle du plafond par variable d'environnement. */
@@ -20,6 +30,11 @@ function lirePlafondEnv(): number | null {
     throw new BadRequestException('MAX_SUPER_ADMINS doit être un entier supérieur à 0.');
   }
   return nombre;
+}
+
+/** Adresse du principal, fournie au seed/CLI par SUPER_ADMIN_PRINCIPAL_EMAIL. */
+export function lireEmailPrincipalEnv(): string | undefined {
+  return process.env.SUPER_ADMIN_PRINCIPAL_EMAIL?.trim() || undefined;
 }
 
 /** Plafond effectif : variable d'environnement ou valeur de la table. */
@@ -38,39 +53,114 @@ export async function lireNombreMaxSuperAdmins(
   return lirePlafondEnv() ?? parametres.nombreMaxSuperAdmins;
 }
 
+/** Origine autorisée : uniquement un processus seed/CLI, jamais une requête HTTP. */
+export type OrigineCreationSuperAdmin = 'SEED' | 'CLI';
+
 /**
- * Promeut un utilisateur au rôle SUPER_ADMIN, sous réserve du plafond.
+ * Crée (ou désigne) un SUPER_ADMIN, uniquement depuis le seed ou un CLI.
  * À appeler IMPÉRATIVEMENT dans une `$transaction` : le verrou advisory
- * sérialise les promotions concurrentes pendant toute la transaction.
+ * sérialise les créations concurrentes pendant toute la transaction.
+ *
+ * Aucune rétrogradation n'est possible ici : retirer `estPrincipal` à un
+ * principal existant est refusé, et le rôle n'est jamais abaissé.
  */
-export async function promouvoirSuperAdminDansTransaction(
+export async function creerSuperAdminDepuisSeedOuCli(
   tx: Prisma.TransactionClient,
-  utilisateurId: string,
-): Promise<{ id: string; email: string; role: Role }> {
+  {
+    utilisateurId,
+    estPrincipal = false,
+    origine,
+  }: {
+    utilisateurId: string;
+    estPrincipal?: boolean;
+    origine: OrigineCreationSuperAdmin;
+  },
+): Promise<{ id: string; email: string; role: Role; estPrincipal: boolean }> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('plafond_super_admins'))`;
 
   const utilisateur = await tx.user.findUnique({
     where: { id: utilisateurId },
-    select: { id: true, email: true, role: true },
+    select: { id: true, email: true, role: true, estPrincipal: true },
   });
   if (!utilisateur) throw new NotFoundException('Utilisateur introuvable.');
-  if (utilisateur.role === Role.SUPER_ADMIN) {
-    throw new ConflictException('Cet utilisateur est déjà SUPER_ADMIN.');
+
+  if (utilisateur.estPrincipal && !estPrincipal) {
+    throw new ConflictException('Le SUPER_ADMIN principal ne peut pas être rétrogradé.');
   }
 
-  const maximum = await lireNombreMaxSuperAdmins(tx);
-  const nombreActuel = await tx.user.count({ where: { role: Role.SUPER_ADMIN } });
-  if (nombreActuel >= maximum) {
-    throw new ConflictException(
-      `Plafond de ${maximum} SUPER_ADMIN atteint : aucune nouvelle promotion n'est possible.`,
+  if (utilisateur.role !== Role.SUPER_ADMIN) {
+    const maximum = await lireNombreMaxSuperAdmins(tx);
+    const nombreActuel = await tx.user.count({ where: { role: Role.SUPER_ADMIN } });
+    if (nombreActuel >= maximum) {
+      throw new ConflictException(
+        `Plafond de ${maximum} SUPER_ADMIN atteint : aucune nouvelle création n'est possible.`,
+      );
+    }
+  }
+
+  if (estPrincipal) {
+    const principalActuel = await tx.user.findFirst({
+      where: { estPrincipal: true },
+      select: { id: true, email: true },
+    });
+    if (principalActuel && principalActuel.id !== utilisateurId) {
+      throw new ConflictException(
+        `Le SUPER_ADMIN principal est déjà ${principalActuel.email}.`,
+      );
+    }
+  }
+
+  if (utilisateur.role === Role.SUPER_ADMIN && utilisateur.estPrincipal === estPrincipal) {
+    return { ...utilisateur }; // idempotent : aucun doublon d'audit
+  }
+
+  const misAJour = await tx.user.update({
+    where: { id: utilisateurId },
+    data: { role: Role.SUPER_ADMIN, estPrincipal },
+    select: { id: true, email: true, role: true, estPrincipal: true },
+  });
+
+  await tx.auditLog.create({
+    data: {
+      action: estPrincipal ? 'SUPER_ADMIN_PRINCIPAL_DESIGNE' : 'SUPER_ADMIN_CREE_SEED_CLI',
+      cible: misAJour.id,
+      acteurId: origine,
+      details: JSON.stringify({
+        email: misAJour.email,
+        role: misAJour.role,
+        estPrincipal: misAJour.estPrincipal,
+        origine,
+      }),
+    },
+  });
+
+  return misAJour;
+}
+
+/**
+ * Protège le principal et réserve la suspension/réactivation d'un autre
+ * SUPER_ADMIN au principal. Appelé par les seules routes de statut qui
+ * existent encore (block/unblock) pour tous les utilisateurs.
+ */
+export function verifierGestionSuperAdmin(
+  cible: { id: string; role: Role; estPrincipal: boolean },
+  acteur: { id: string; estPrincipal?: boolean },
+  action: 'SUSPENSION' | 'REACTIVATION',
+): void {
+  if (cible.id === acteur.id) {
+    throw new ForbiddenException('Un SUPER_ADMIN ne peut pas modifier son propre statut.');
+  }
+  if (cible.estPrincipal) {
+    throw new ForbiddenException(
+      'Le SUPER_ADMIN principal est protégé : il ne peut être ni modifié, ni suspendu, ni rétrogradé, ni supprimé par un autre compte.',
     );
   }
-
-  return tx.user.update({
-    where: { id: utilisateurId },
-    data: { role: Role.SUPER_ADMIN },
-    select: { id: true, email: true, role: true },
-  });
+  if (cible.role === Role.SUPER_ADMIN && !acteur.estPrincipal) {
+    const verbe = action === 'SUSPENSION' ? 'suspendre' : 'réactiver';
+    throw new ForbiddenException(
+      `Seul le SUPER_ADMIN principal peut ${verbe} un autre SUPER_ADMIN.`,
+    );
+  }
 }
 
 /**

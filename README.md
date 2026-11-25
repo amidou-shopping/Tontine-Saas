@@ -15,10 +15,11 @@ tontine-saas/
 ├── backend/                         # API NestJS (port 3001)
 │   ├── prisma/
 │   │   ├── schema.prisma
-│   │   ├── migrations/              # 9 migrations datées (jamais de reset en équipe)
+│   │   ├── migrations/              # 13 migrations datées (jamais de reset en équipe)
 │   │   └── seed.ts                  # idempotent ; refuse NODE_ENV=production
 │   ├── src/
-│   │   ├── admin/                   # Back-office Super-Admin + promotion
+│   │   ├── admin/                   # Back-office Super-Admin (aucune promotion)
+│   │   ├── cli/                     # Création des SUPER_ADMIN (seed/CLI uniquement)
 │   │   ├── auth/                    # Inscription, OTP, renvoi, JWT, guards
 │   │   ├── tontines/                # Cœur métier : rotation & cycles atomiques
 │   │   ├── payments/                # Providers + webhooks HMAC + anti-replay
@@ -31,7 +32,7 @@ tontine-saas/
 │   │   │                            #  gouvernance Super-Admin)
 │   │   ├── app.module.ts
 │   │   └── main.ts                  # active le rawBody pour les webhooks
-│   ├── test/                        # 9 suites Jest (règles métier, HMAC, etc.)
+│   ├── test/                        # 12 suites Jest (règles métier, HMAC, etc.)
 │   └── .env.example
 │
 └── frontend/                        # Next.js App Router (port 3000)
@@ -45,13 +46,13 @@ tontine-saas/
     │   ├── profil/page.tsx          # Profil + abonnement (grille, essai, renouvellement)
     │   ├── tontines/[id]/page.tsx
     │   ├── admin-tontines/page.tsx  # Demandes, tirage au sort, exclusions, suppression
-    │   └── admin/dashboard/page.tsx # Pilotage + promotion des Super-Admins
+    │   └── admin/dashboard/page.tsx # Pilotage + gestion des statuts (plus de promotion)
     ├── components/
     │   ├── Navigation.tsx           # rôle lu depuis l'API + cloche de notifications
     │   ├── NotificationsBell.tsx
     │   ├── SupportButton.tsx        # Bouton flottant WhatsApp (utilisateur connecté)
     │   ├── MemberDashboard.tsx      # Paiement de l'arriéré en deux temps
-    │   └── admin/UsersTable.tsx     # Blocage + promotion Super-Admin
+    │   └── admin/UsersTable.tsx     # Blocage/déblocage ; aucune promotion Super-Admin
     ├── lib/api.ts                   # Fetch authentifié + gestion de session/erreurs
     └── next.config.js               # Proxy /api/* → API NestJS
 ```
@@ -67,7 +68,7 @@ cd backend
 cp .env.example .env          # DATABASE_URL pré-rempli pour le docker-compose (port 5433)
 npm install
 npx prisma generate
-npx prisma migrate deploy     # applique les 9 migrations datées (jamais migrate dev en équipe)
+npx prisma migrate deploy     # applique les 13 migrations datées (jamais migrate dev en équipe)
 npm run prisma:seed           # facultatif, DEVELOPPEMENT UNIQUEMENT ; idempotent
 npm run start:dev             # API sur http://localhost:3001
 
@@ -81,9 +82,10 @@ npm run dev                   # Site sur http://localhost:3000
 Ouvre **http://localhost:3000** : tu arrives sur `/login`.
 
 **Compte de démo (créé par le seed, développement uniquement)** :
-`admin@tontine.sn` / `Password123!` → dashboard Super-Admin. Le seed refuse
-formellement de s'exécuter si `NODE_ENV=production` : ni création du compte,
-ni annonce du mot de passe dans les logs. Autres comptes de démo :
+`admin@tontine.sn` / `Password123!` → dashboard Super-Admin **principal**
+(désigné par `SUPER_ADMIN_PRINCIPAL_EMAIL`, sinon ce compte démo en local). Le
+seed refuse formellement de s'exécuter si `NODE_ENV=production` : ni création
+du compte, ni annonce du mot de passe dans les logs. Autres comptes de démo :
 `aissatou@example.com` (ADMIN_TONTINE), `moussa@example.com` et
 `khady@example.com` (MEMBER), tous avec `Password123!`.
 
@@ -116,7 +118,11 @@ vers l'entier inférieur est centralisé dans `common/finances.util.ts`.
 | `TAUX_AMENDE_RETARD` | 0,10 (10 %) | Amende sur cotisation en retard |
 | `DELAI_GRACE_HEURES` | 24 | Grâce avant amende |
 | `DELAI_AVERTISSEMENT_SUPPRESSION_JOURS` | 7 | Délai avant suppression sécurisée d'une tontine |
-| `MAX_SUPER_ADMINS` | 3 | Plafond des Super-Admins |
+| `MAX_SUPER_ADMINS` | 3 | Plafond des Super-Admins (vérifié en transaction au seed/CLI) |
+| `SUPER_ADMIN_PRINCIPAL_EMAIL` | `admin@tontine.sn` en local | Email du SUPER_ADMIN principal (unique) |
+| `SUPER_ADMIN_EMAILS` | vide | Jusqu'à 2 autres emails de SUPER_ADMIN créés au seed |
+| `SUPER_ADMIN_PASSWORD` | vide | Mot de passe du CLI `npm run super-admin:creer` |
+| `FRAIS_PASSAGE_ADMIN` | 1000 | Frais FCFA entiers du passage au rôle `ADMIN_TONTINE` |
 | `SUPPORT_1_NAME` / `SUPPORT_1_PHONE` … `SUPPORT_3_*` | placeholders fictifs | Contacts WhatsApp (format international **sans `+`**) |
 | `PRIX_STANDARD_FCFA` | 5000 | Prix du plan STANDARD (entier) |
 | `PRIX_PREMIUM_FCFA` | 15000 | Prix du plan PREMIUM (entier) |
@@ -159,7 +165,11 @@ Ordre des migrations : `20260819173126_init`, `20260928134404_add_pending_paymen
 `20261123120000_gouvernance_phase3`,
 `20261123121000_delai_avertissement_suppression`,
 `20261124090000_plafond_super_admins`,
-`20261124100000_abonnements_configurables`.
+`20261124100000_abonnements_configurables`,
+`20261125123000_createur_membre_rattrapage`,
+`20261125130000_notification_lien`,
+`20261125140000_passage_admin_paye`,
+`20261125150000_super_admin_principal`.
 
 ## Fonctionnalités et règles métier
 
@@ -168,7 +178,7 @@ Ordre des migrations : `20260819173126_init`, `20260928134404_add_pending_paymen
 - Renvoi : 60 s entre deux envois, 3 par heure ; 5 tentatives incorrectes / 15 min
 - Connexion : bcrypt 12 rounds, 5 tentatives / 15 min, comparaison à temps constant
 - JWT avec `JwtAuthGuard` + `RolesGuard` ; rôle et statut rechargés depuis la DB à chaque requête
-- **Aucune route publique n'accorde `SUPER_ADMIN`** : l'inscription force `MEMBER`, `/member/devenir-admin` donne uniquement `ADMIN_TONTINE` ; la seule élévation est `POST /admin/users/:id/promouvoir-super-admin`, protégée et transactionnelle
+- **Aucune route n'accorde `SUPER_ADMIN`** : l'inscription force `MEMBER`, le paiement `/member/devenir-admin` donne uniquement `ADMIN_TONTINE`. Ni DTO ni contrôleur n'exposent `role`, `estPrincipal` ou `isBlocked` en écriture (`ValidationPipe` en `forbidNonWhitelisted`)
 
 ### Tontines et règles financières
 - Cotisation **hebdomadaire** au `jourCotisation` choisi (`LUNDI` par défaut), échéances calculées en UTC
@@ -194,9 +204,20 @@ Ordre des migrations : `20260819173126_init`, `20260928134404_add_pending_paymen
 - Une `dateFin` dépassée bloque la création de tontine même si le booléen `actif` est vrai ; bouton **Renouveler** dans le profil
 - `GRATUIT` = 1 tontine, `STANDARD` = 5, `PREMIUM` = illimité ; les `MEMBER` ne peuvent pas souscrire ni créer
 
-### Gouvernance & support
-- Au maximum 3 Super-Admins (configurable), promotion vérifiée dans une transaction verrouillée, auditée et notifiée
-- Comptes démo protégés : seed refusé en production ; `admin@tontine.sn` créé/promu uniquement en développement
+### Super-Admins (Point 4)
+- **Aucune promotion possible** : ni interface, ni DTO, ni endpoint, ni raccourci serveur. Seuls le seed (`npm run prisma:seed`) et le CLI (`npm run super-admin:creer -- email`) peuvent créer un SUPER_ADMIN
+- **3 comptes maximum** (configurable), contrôlés dans une transaction verrouillée par `pg_advisory_xact_lock` ; deux créations concurrentes ne peuvent pas dépasser le plafond
+- **Un seul principal** : désigné au seed/CLI par `SUPER_ADMIN_PRINCIPAL_EMAIL`, garanti par un index unique partiel en base **et** un contrôle transactionnel
+- Le principal ne peut être ni modifié, ni suspendu, ni rétrogradé, ni supprimé par un autre compte. Il est le seul à pouvoir suspendre/réactiver un autre SUPER_ADMIN
+- Le statut Super-Admin est **immuable via l'API** ; chaque création/désignation et chaque suspension/réactivation est tracée dans `AuditLog` (`SUPER_ADMIN_CREE_SEED_CLI`, `SUPER_ADMIN_PRINCIPAL_DESIGNE`, `USER_BLOCKED`/`USER_UNBLOCKED`)
+- Comptes démo protégés : seed refusé en production ; `admin@tontine.sn` créé/désigné uniquement en développement
+
+### Passage au rôle Admin
+- Frais de `1000` FCFA par défaut (`ParametresPlateforme.fraisPassageAdminFcfa`, surchargeable par `FRAIS_PASSAGE_ADMIN`), affichés avant acceptation explicite dans le dashboard membre
+- `PendingPayment` de type `PASSAGE_ADMIN`, sans tontine ; simulation conservée
+- Confirmation idempotente verrouillée (`pg_advisory_xact_lock(hashtext(userId))`) : paiement + rôle `ADMIN_TONTINE` + abonnement + audit `PASSAGE_ADMIN_PAYE` dans une seule transaction
+
+### Support
 - Bouton flottant « Aide » visible uniquement connecté : 3 contacts support et liens `wa.me` préremplis avec l'identifiant (construits côté serveur, `GET /member/support-contacts`)
 
 ### Notifications & profil
@@ -227,7 +248,7 @@ Ordre des migrations : `20260819173126_init`, `20260928134404_add_pending_paymen
 # Backend
 cd backend
 npm run build
-npm test -- --runInBand          # 9 suites, 77 tests
+npm test -- --runInBand          # 12 suites, 95 tests
 npx prisma validate
 npx prisma migrate status
 

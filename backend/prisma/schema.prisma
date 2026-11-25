@@ -63,6 +63,7 @@ enum TransactionType {
   COMMISSION           // Commission SaaS prélevée sur une cotisation
   AMENDE_RETARD        // Amende de retard intégralement versée au bénéficiaire du tour
   ABONNEMENT           // Paiement d'un abonnement SaaS par un ADMIN_TONTINE
+  PASSAGE_ADMIN        // Paiement unique MEMBER -> ADMIN_TONTINE (1000 F par défaut)
   REMBOURSEMENT
 }
 
@@ -108,6 +109,9 @@ model User {
   nom           String
   prenom        String
   role          Role     @default(MEMBER)
+  // Un seul SUPER_ADMIN principal : désigné au seed/CLI par SUPER_ADMIN_PRINCIPAL_EMAIL.
+  // Champ immuable via l'API (aucun DTO ni route ne l'expose en écriture).
+  estPrincipal  Boolean  @default(false)
   isBlocked     Boolean  @default(false) // Action du Super-Admin (back-office)
   isVerified    Boolean  @default(false) // Vérification OTP téléphone
   avatarUrl     String?
@@ -167,6 +171,8 @@ model ParametresPlateforme {
   // Phase 6 : grille d'abonnements, entièrement configurable (FCFA entiers).
   prixStandardFcfa         Int @default(5000)
   prixPremiumFcfa          Int @default(15000)
+  // Frais unique de passage MEMBER -> ADMIN_TONTINE, surchargeable par FRAIS_PASSAGE_ADMIN.
+  fraisPassageAdminFcfa    Int @default(1000)
   limiteTontinesGratuites  Int @default(1)
   limiteTontinesStandard   Int @default(5)
   dureeEssaiJours          Int @default(14)
@@ -336,6 +342,8 @@ model Notification {
   titre     String
   message   String
   type      String   @default("INFO") // INFO, WARNING, SUCCESS, ERROR
+  // Lien interne optionnel vers la page concernée (ex: gestion d'une demande).
+  lien      String?
   lue       Boolean  @default(false)
   createdAt DateTime @default(now())
 
@@ -349,12 +357,14 @@ model Notification {
 
 model PendingPayment {
   id               String    @id @default(cuid())
-  tontineId        String
-  tontine          Tontine   @relation(fields: [tontineId], references: [id])
+  // COTISATION (tontine + membre requis) ou PASSAGE_ADMIN (aucune tontine).
+  type             String    @default("COTISATION")
+  tontineId        String?
+  tontine          Tontine?  @relation(fields: [tontineId], references: [id])
   userId           String
   user             User      @relation(fields: [userId], references: [id])
-  tontineMemberId  String
-  tontineMember    TontineMember @relation(fields: [tontineMemberId], references: [id])
+  tontineMemberId  String?
+  tontineMember    TontineMember? @relation(fields: [tontineMemberId], references: [id])
 
   provider         PaymentProvider
   referenceInterne String    @unique // Clé de liaison envoyée au provider (ex: "tontineId:userId:timestamp")
@@ -370,6 +380,7 @@ model PendingPayment {
   updatedAt        DateTime  @updatedAt
 
   @@index([tontineId, userId])
+  @@index([type, statut])
   @@index([statut])
   @@map("pending_payments")
 }

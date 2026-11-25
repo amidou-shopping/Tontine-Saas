@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   apiFetch,
   getProfilServeur,
@@ -16,6 +16,17 @@ interface DemandeEnAttente {
   statut: string;
   createdAt: string;
   user: { id: string; nom: string; prenom: string; email: string };
+}
+
+interface DemandeDetail {
+  id: string;
+  statut: string;
+  traiteeAt: string | null;
+  motifRefus: string | null;
+  dejaTraitee: boolean;
+  message: string;
+  user: { id: string; nom: string; prenom: string; email: string };
+  tontine: { id: string; nom: string };
 }
 
 interface MembreAdmin {
@@ -43,12 +54,25 @@ interface TontineAdmin {
 }
 
 export default function AdminTontinesPage() {
+  return (
+    <Suspense fallback={<div className="p-8 text-center text-gray-500">Chargement...</div>}>
+      <AdminTontinesContenu />
+    </Suspense>
+  );
+}
+
+function AdminTontinesContenu() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const tontineCibleId = searchParams.get('tontineId');
+  const demandeCibleId = searchParams.get('demandeId');
   const [tontines, setTontines] = useState<TontineAdmin[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalCreationOuverte, setModalCreationOuverte] = useState(false);
   const [creationEnCours, setCreationEnCours] = useState(false);
   const [actionEnCours, setActionEnCours] = useState<string | null>(null);
+  const [demandeCible, setDemandeCible] = useState<DemandeDetail | null>(null);
+  const [messageDemande, setMessageDemande] = useState<string | null>(null);
   const [nouvelleTontine, setNouvelleTontine] = useState<{ id: string; nom: string; codeInvitation: string } | null>(null);
   const [formTontine, setFormTontine] = useState({
     nom: '',
@@ -70,10 +94,11 @@ export default function AdminTontinesPage() {
         router.push('/dashboard');
         return;
       }
-      chargerTontines();
+      await chargerTontines();
+      await chargerDemandeCible();
     }
     verifierAcces();
-  }, []);
+  }, [demandeCibleId]);
 
   async function chargerTontines() {
     try {
@@ -92,6 +117,32 @@ export default function AdminTontinesPage() {
       setLoading(false);
     }
   }
+
+  /** Ouvre la demande ciblée par le lien reçu par notification. */
+  async function chargerDemandeCible() {
+    if (!demandeCibleId) return;
+    try {
+      const res = await apiFetch(`/api/tontines/demandes/${demandeCibleId}`);
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMessageDemande(extraireMessageErreur(payload, 'Impossible d’ouvrir cette demande.'));
+        return;
+      }
+      const detail = payload as DemandeDetail;
+      setDemandeCible(detail);
+      if (detail.dejaTraitee) setMessageDemande(detail.message);
+    } catch (err) {
+      console.error(err);
+      setMessageDemande('Impossible d’ouvrir cette demande.');
+    }
+  }
+
+  useEffect(() => {
+    if (!demandeCible || demandeCible.dejaTraitee) return;
+    document
+      .getElementById(`demande-${demandeCible.id}`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [demandeCible, tontines]);
 
   async function creerTontine(e: React.FormEvent) {
     e.preventDefault();
@@ -200,6 +251,26 @@ export default function AdminTontinesPage() {
           Déconnexion
         </button>
       </div>
+
+      {messageDemande && (
+        <div
+          className={`rounded-xl border p-3 text-sm ${
+            demandeCible?.dejaTraitee
+              ? 'border-amber-200 bg-amber-50 text-amber-900'
+              : 'border-red-200 bg-red-50 text-red-800'
+          }`}
+        >
+          <p className="font-semibold">
+            {demandeCible?.dejaTraitee
+              ? `Demande ${demandeCible.statut.toLowerCase()} — ${demandeCible.user.prenom} ${demandeCible.user.nom}`
+              : 'Demande indisponible'}
+          </p>
+          <p className="mt-1">{messageDemande}</p>
+          {demandeCible?.motifRefus && (
+            <p className="mt-1 text-xs">Motif du refus : {demandeCible.motifRefus}</p>
+          )}
+        </div>
+      )}
 
       <button
         onClick={() => setModalCreationOuverte(true)}
@@ -326,7 +397,15 @@ export default function AdminTontinesPage() {
           <p className="text-gray-400 text-sm text-center py-8">Aucune tontine créée.</p>
         )}
         {tontines.map((t) => (
-          <div key={t.id} className="rounded-2xl border border-gray-200 shadow-sm p-4 bg-white space-y-3">
+          <div
+            key={t.id}
+            id={`tontine-${t.id}`}
+            className={`rounded-2xl border shadow-sm p-4 bg-white space-y-3 ${
+              demandeCible && !demandeCible.dejaTraitee && t.id === demandeCible.tontine.id
+                ? 'border-sky-300 ring-2 ring-sky-400'
+                : 'border-gray-200'
+            }`}
+          >
             <div className="flex justify-between items-start">
               <div>
                 <h3 className="font-semibold text-gray-900">{t.nom}</h3>
@@ -370,7 +449,12 @@ export default function AdminTontinesPage() {
                 {t.demandesAdhesion.map((d) => (
                   <div
                     key={d.id}
-                    className="rounded-lg bg-white border border-amber-100 p-2 space-y-2"
+                    id={`demande-${d.id}`}
+                    className={`rounded-lg bg-white border p-2 space-y-2 ${
+                      demandeCibleId === d.id && !demandeCible?.dejaTraitee
+                        ? 'border-sky-300 ring-2 ring-sky-400'
+                        : 'border-amber-100'
+                    }`}
                   >
                     <div>
                       <p className="text-sm font-medium text-gray-900">

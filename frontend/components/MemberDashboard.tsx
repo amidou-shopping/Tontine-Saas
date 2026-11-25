@@ -57,6 +57,7 @@ interface TontineDisponible {
   montantCotisation: number;
   frequence: string;
   nombreMaxMembres: number;
+  createurId: string;
   _count: { membres: number };
 }
 
@@ -88,9 +89,19 @@ export default function MemberDashboard({ role }: { role: string }) {
   const [rejoindreEnCours, setRejoindreEnCours] = useState<string | null>(null);
   const [roleActuel, setRoleActuel] = useState(role);
   const [devenirAdminEnCours, setDevenirAdminEnCours] = useState(false);
+  const [fraisPassageAdmin, setFraisPassageAdmin] = useState<number | null>(null);
+  const [providerPassageAdmin, setProviderPassageAdmin] = useState('WAVE');
+  const [referencePassageAdmin, setReferencePassageAdmin] = useState<string | null>(null);
   const [demandes, setDemandes] = useState<DemandeAdhesion[]>([]);
 
   const peutCreer = roleActuel === 'ADMIN_TONTINE' || roleActuel === 'SUPER_ADMIN';
+  // Le créateur est membre d'office : on ne lui propose pas de demander à
+  // rejoindre sa propre tontine (le serveur refuse aussi toutes les voies).
+  const utilisateurConnecteId = getCurrentUser<{ id: string }>()?.id;
+  const prixPassageAdmin =
+    fraisPassageAdmin === null
+      ? '...'
+      : `${fraisPassageAdmin.toLocaleString('fr-FR')} F`;
 
   // États pour la création de tontine
   const [modalCreationOuverte, setModalCreationOuverte] = useState(false);
@@ -112,7 +123,21 @@ export default function MemberDashboard({ role }: { role: string }) {
     fetchMesTontines();
     fetchTontinesDisponibles();
     fetchMesDemandes();
+    fetchTarifPassageAdmin();
   }, []);
+
+  /** Prix serveur (FRAIS_PASSAGE_ADMIN ou valeur de la table singleton). */
+  async function fetchTarifPassageAdmin() {
+    try {
+      const res = await apiFetch('/api/member/devenir-admin/tarif');
+      if (res.ok) {
+        const payload = (await res.json()) as { fraisPassageAdminFcfa: number };
+        setFraisPassageAdmin(enNombre(payload.fraisPassageAdminFcfa));
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }
 
   async function fetchMesTontines() {
     try {
@@ -154,15 +179,52 @@ export default function MemberDashboard({ role }: { role: string }) {
   }
 
   /**
-   * Passage explicite au rôle ADMIN_TONTINE. Le serveur ne peut jamais
-   * accorder SUPER_ADMIN depuis cette route.
+   * Passage au rôle ADMIN_TONTINE après paiement unique. Le prix vient du
+   * serveur ; le rôle n'est accordé qu'après confirmation du paiement.
    */
   async function devenirAdmin() {
+    const prix = fraisPassageAdmin === null ? 'les frais' : `${fraisPassageAdmin} F`;
+    if (
+      !window.confirm(
+        `Devenir administrateur de tontine : paiement unique de ${prix}. Le rôle sera activé après confirmation du paiement. Continuer ?`,
+      )
+    ) {
+      return;
+    }
     try {
       setDevenirAdminEnCours(true);
-      const res = await apiFetch('/api/member/devenir-admin', { method: 'POST' });
+      setMessageErreur(null);
+      const res = await apiFetch('/api/member/devenir-admin', {
+        method: 'POST',
+        body: JSON.stringify({ provider: providerPassageAdmin }),
+      });
       const payload = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(extraireMessageErreur(payload, 'Impossible de devenir admin.'));
+      if (!res.ok) {
+        throw new Error(extraireMessageErreur(payload, 'Impossible d’initier le paiement.'));
+      }
+
+      const reference = (payload as { referenceInterne?: string }).referenceInterne;
+      if (!reference) throw new Error('Référence de paiement manquante.');
+      setReferencePassageAdmin(reference);
+      await confirmerPassageAdmin(reference);
+    } catch (err: any) {
+      setMessageErreur(err.message || 'Impossible de devenir administrateur.');
+    } finally {
+      setDevenirAdminEnCours(false);
+    }
+  }
+
+  /** Confirmation idempotente : c'est ici seulement que le serveur change le rôle. */
+  async function confirmerPassageAdmin(reference: string) {
+    setDevenirAdminEnCours(true);
+    setMessageErreur(null);
+    try {
+      const res = await apiFetch('/api/member/devenir-admin/confirmer', {
+        method: 'POST',
+        body: JSON.stringify({ referenceInterne: reference }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(extraireMessageErreur(payload, 'Paiement non confirmé.'));
 
       setRoleActuel('ADMIN_TONTINE');
       const token = getToken();
@@ -170,9 +232,10 @@ export default function MemberDashboard({ role }: { role: string }) {
       if (token && utilisateur) {
         setSession(token, { ...utilisateur, role: 'ADMIN_TONTINE' });
       }
+      setReferencePassageAdmin(null);
       setMessageSucces(extraireMessageErreur(payload, 'Vous êtes désormais administrateur.'));
     } catch (err: any) {
-      setMessageErreur(err.message || 'Impossible de devenir administrateur.');
+      setMessageErreur(err.message || 'Paiement non confirmé.');
     } finally {
       setDevenirAdminEnCours(false);
     }
@@ -332,15 +395,47 @@ export default function MemberDashboard({ role }: { role: string }) {
         <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 space-y-2">
           <p className="text-sm font-semibold text-sky-900">Vous êtes membre</p>
           <p className="text-xs text-sky-800">
-            Seuls les administrateurs peuvent créer une tontine. Vous pouvez demander à rejoindre
-            une tontine existante, ou devenir administrateur gratuitement.
+            Seuls les administrateurs peuvent créer une tontine. Le passage au rôle Admin coûte{' '}
+            <strong>{prixPassageAdmin}</strong> (paiement unique, non remboursable). Votre numéro de
+            téléphone doit être vérifié. Vous pouvez aussi demander à rejoindre une tontine
+            existante.
           </p>
+          <div className="flex gap-2" aria-label="Moyen de paiement">
+            {PROVIDERS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setProviderPassageAdmin(p.id)}
+                className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${
+                  providerPassageAdmin === p.id
+                    ? 'border-sky-600 bg-white text-sky-700'
+                    : 'border-sky-200 text-sky-800'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          {referencePassageAdmin && (
+            <button
+              type="button"
+              onClick={() => confirmerPassageAdmin(referencePassageAdmin)}
+              disabled={devenirAdminEnCours}
+              className="w-full rounded-xl border border-sky-600 bg-white text-sky-700 py-2.5 text-sm font-semibold hover:bg-sky-100 disabled:opacity-40"
+            >
+              Confirmer le paiement ({prixPassageAdmin})
+            </button>
+          )}
           <button
             onClick={devenirAdmin}
-            disabled={devenirAdminEnCours}
+            disabled={devenirAdminEnCours || referencePassageAdmin !== null}
             className="w-full rounded-xl bg-sky-600 text-white py-2.5 text-sm font-semibold hover:bg-sky-700 disabled:opacity-40"
           >
-            {devenirAdminEnCours ? 'Patientez...' : 'Devenir Admin'}
+            {devenirAdminEnCours
+              ? 'Patientez...'
+              : referencePassageAdmin
+                ? 'Paiement en attente de confirmation'
+                : `Devenir Admin — ${prixPassageAdmin}`}
           </button>
         </div>
       )}
@@ -676,13 +771,19 @@ export default function MemberDashboard({ role }: { role: string }) {
                 {t._count.membres}/{t.nombreMaxMembres}
               </span>
             </div>
-            <button
-              onClick={() => rejoindreTontine(t.id)}
-              disabled={rejoindreEnCours === t.id}
-              className="w-full rounded-xl bg-gray-900 text-white py-2 text-sm font-semibold disabled:opacity-40"
-            >
-              {rejoindreEnCours === t.id ? 'Envoi...' : 'Demander à rejoindre'}
-            </button>
+            {t.createurId === utilisateurConnecteId ? (
+              <p className="text-xs font-medium text-sky-700">
+                Vous êtes membre créateur de cette tontine.
+              </p>
+            ) : (
+              <button
+                onClick={() => rejoindreTontine(t.id)}
+                disabled={rejoindreEnCours === t.id}
+                className="w-full rounded-xl bg-gray-900 text-white py-2 text-sm font-semibold disabled:opacity-40"
+              >
+                {rejoindreEnCours === t.id ? 'Envoi...' : 'Demander à rejoindre'}
+              </button>
+            )}
           </div>
         ))}
       </div>

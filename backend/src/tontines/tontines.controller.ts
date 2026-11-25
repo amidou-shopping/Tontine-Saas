@@ -49,28 +49,29 @@ export class TontinesController {
     return this.tontinesService.rejoindre(id, req.user.id);
   }
 
+  /**
+   * Ouvre une demande depuis une notification : le service vérifie que
+   * l'appelant est le créateur de la tontine (aucun contournement SUPER_ADMIN).
+   */
+  @Get('demandes/:demandeId')
+  @Roles(Role.ADMIN_TONTINE, Role.SUPER_ADMIN)
+  @UseGuards(RolesGuard)
+  lireDemande(@Param('demandeId') demandeId: string, @Req() req: any) {
+    return this.tontinesService.lireDemande(demandeId, req.user.id);
+  }
+
   @Get(':id/demandes')
   @Roles(Role.ADMIN_TONTINE, Role.SUPER_ADMIN)
   @UseGuards(RolesGuard)
   listerDemandes(@Param('id') id: string, @Req() req: any) {
-    return this.tontinesService.listerDemandes(
-      id,
-      req.user.id,
-      req.user.role === Role.SUPER_ADMIN,
-    );
+    return this.tontinesService.listerDemandes(id, req.user.id);
   }
 
   @Post('demandes/:demandeId/accepter')
   @Roles(Role.ADMIN_TONTINE, Role.SUPER_ADMIN)
   @UseGuards(RolesGuard)
   accepterDemande(@Param('demandeId') demandeId: string, @Req() req: any) {
-    return this.tontinesService.repondreDemande(
-      demandeId,
-      req.user.id,
-      true,
-      undefined,
-      req.user.role === Role.SUPER_ADMIN,
-    );
+    return this.tontinesService.repondreDemande(demandeId, req.user.id, true);
   }
 
   @Post('demandes/:demandeId/refuser')
@@ -81,13 +82,7 @@ export class TontinesController {
     @Body() dto: RepondreDemandeDto,
     @Req() req: any,
   ) {
-    return this.tontinesService.repondreDemande(
-      demandeId,
-      req.user.id,
-      false,
-      dto.motifRefus,
-      req.user.role === Role.SUPER_ADMIN,
-    );
+    return this.tontinesService.repondreDemande(demandeId, req.user.id, false, dto.motifRefus);
   }
 
   @Post(':id/membres/:userId/exclure')

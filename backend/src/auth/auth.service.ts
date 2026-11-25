@@ -175,6 +175,7 @@ export class AuthService {
         nom: user.nom,
         prenom: user.prenom,
         role: user.role,
+        estPrincipal: user.estPrincipal,
       },
     };
   }

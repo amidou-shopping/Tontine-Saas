@@ -25,7 +25,7 @@ import { Roles } from '../auth/roles.decorator';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { lireDelaiAvertissementSuppression } from '../common/parametres-financiers';
-import { promouvoirSuperAdminDansTransaction } from '../common/super-admins.util';
+import { verifierGestionSuperAdmin } from '../common/super-admins.util';
 import {
   Role,
   TransactionStatus,
@@ -216,6 +216,7 @@ export class AdminController {
           email: true,
           telephone: true,
           role: true,
+          estPrincipal: true,
           isBlocked: true,
           isVerified: true,
           createdAt: true,
@@ -230,69 +231,76 @@ export class AdminController {
 
   /**
    * PATCH /admin/users/:id/block
-   * Bloque un utilisateur (ex: fraude, cotisations impayées répétées...).
-   * Un utilisateur bloqué ne peut plus se connecter (vérifié dans AuthGuard).
+   * Suspend un utilisateur. Le SUPER_ADMIN principal est intouchable et
+   * seule la principale peut suspendre un autre SUPER_ADMIN.
    */
   @Patch('users/:id/block')
   async blockUser(@Param('id') id: string, @Req() req: any) {
-    const existant = await this.prisma.user.findUnique({ where: { id } });
-    if (!existant) throw new NotFoundException('Utilisateur introuvable.');
-
-    const user = await this.prisma.user.update({
-      where: { id },
-      data: { isBlocked: true },
-      select: { id: true, email: true, isBlocked: true },
+    const user = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}))`;
+      const cible = await tx.user.findUnique({
+        where: { id },
+        select: { id: true, email: true, role: true, estPrincipal: true, isBlocked: true },
+      });
+      if (!cible) throw new NotFoundException('Utilisateur introuvable.');
+      verifierGestionSuperAdmin(
+        cible,
+        { id: req.user.id, estPrincipal: Boolean(req.user.estPrincipal) },
+        'SUSPENSION',
+      );
+      return tx.user.update({
+        where: { id },
+        data: { isBlocked: true },
+        select: { id: true, email: true, role: true, estPrincipal: true, isBlocked: true },
+      });
     });
-    await this.audit.log('USER_BLOCKED', user.id, req.user.id);
+
+    await this.audit.log('USER_BLOCKED', user.id, req.user.id, {
+      role: user.role,
+      estPrincipal: user.estPrincipal,
+      type: user.role === Role.SUPER_ADMIN ? 'SUPER_ADMIN_SUSPENDU' : 'UTILISATEUR_BLOQUE',
+    });
     return { message: `Utilisateur ${user.email} bloqué avec succès.`, user };
   }
 
   /**
    * PATCH /admin/users/:id/unblock
-   * Débloque un utilisateur précédemment suspendu.
+   * Réactive un utilisateur, sous les mêmes règles de protection.
    */
   @Patch('users/:id/unblock')
   async unblockUser(@Param('id') id: string, @Req() req: any) {
-    const existant = await this.prisma.user.findUnique({ where: { id } });
-    if (!existant) throw new NotFoundException('Utilisateur introuvable.');
-
-    const user = await this.prisma.user.update({
-      where: { id },
-      data: { isBlocked: false },
-      select: { id: true, email: true, isBlocked: true },
+    const user = await this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}))`;
+      const cible = await tx.user.findUnique({
+        where: { id },
+        select: { id: true, email: true, role: true, estPrincipal: true, isBlocked: true },
+      });
+      if (!cible) throw new NotFoundException('Utilisateur introuvable.');
+      verifierGestionSuperAdmin(
+        cible,
+        { id: req.user.id, estPrincipal: Boolean(req.user.estPrincipal) },
+        'REACTIVATION',
+      );
+      return tx.user.update({
+        where: { id },
+        data: { isBlocked: false },
+        select: { id: true, email: true, role: true, estPrincipal: true, isBlocked: true },
+      });
     });
-    await this.audit.log('USER_UNBLOCKED', user.id, req.user.id);
+
+    await this.audit.log('USER_UNBLOCKED', user.id, req.user.id, {
+      role: user.role,
+      estPrincipal: user.estPrincipal,
+      type: user.role === Role.SUPER_ADMIN ? 'SUPER_ADMIN_REACTIVE' : 'UTILISATEUR_DEBLOQUE',
+    });
     return { message: `Utilisateur ${user.email} débloqué avec succès.`, user };
   }
 
-  /**
-   * POST /admin/users/:id/promouvoir-super-admin
-   * Seule voie d'élévation au rôle SUPER_ADMIN. Réservée au back-office
-   * (garde de classe @Roles(SUPER_ADMIN)) et plafonnée dans une transaction
-   * verrouillée : aucune route publique n'accorde ce rôle (Phase 4).
+  /*
+   * Aucune route de promotion / rétrogradation / suppression n'existe plus :
+   * les SUPER_ADMIN sont créés uniquement par le seed ou le CLI (plafond
+   * vérifié en transaction), et leur statut est immuable via l'API.
    */
-  @Post('users/:id/promouvoir-super-admin')
-  async promouvoirSuperAdmin(@Param('id') id: string, @Req() req: any) {
-    const promu = await this.prisma.$transaction((tx) =>
-      promouvoirSuperAdminDansTransaction(tx, id),
-    );
-
-    await this.audit.log('SUPER_ADMIN_PROMU', promu.id, req.user.id, {
-      email: promu.email,
-      role: promu.role,
-    });
-    await this.notifications.creerNotification(
-      promu.id,
-      'Promotion Super-Admin',
-      'Vous disposez désormais des droits d’administration de la plateforme.',
-      'SUCCESS',
-    );
-
-    return {
-      message: 'L’utilisateur est désormais Super-Admin.',
-      user: promu,
-    };
-  }
 
   /** GET /admin/tontines — liste de pilotage pour la suppression sécurisée. */
   @Get('tontines')

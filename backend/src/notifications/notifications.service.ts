@@ -20,9 +20,10 @@ export class NotificationsService {
     titre: string,
     message: string,
     type = 'INFO',
+    lien?: string | null,
   ) {
     return this.prisma.notification.create({
-      data: { userId, titre, message, type },
+      data: { userId, titre, message, type, lien: lien ?? null },
     });
   }
 
