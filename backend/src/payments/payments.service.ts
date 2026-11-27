@@ -106,22 +106,14 @@ export class PaymentsService {
       },
     });
 
-    try {
-      return await this.tontinesService.enregistrerCotisation(
-        tontineId,
-        userId,
-        providerName as PaymentProvider,
-        referenceExterne,
-        pending.id,
-        cible.cycle,
-      );
-    } catch (erreur) {
-      await this.prisma.pendingPayment.update({
-        where: { id: pending.id },
-        data: { statut: 'ECHOUEE', webhookRecu: true, dateWebhook: new Date() },
-      });
-      throw erreur;
-    }
+    return {
+      statut: 'EN_ATTENTE',
+      referenceInterne,
+      referenceExterne,
+      montant: cible.montantTotal,
+      cycle: cible.cycle,
+      message: 'Paiement initié. Confirmation requise par le provider.',
+    };
   }
 
   /**
