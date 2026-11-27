@@ -156,40 +156,25 @@ describe('changement de plan et période d’essai (Phase 6)', () => {
     ).toBe(0);
   });
 
-  it('prélève un paiement simulé entier après l’essai, valable 30 jours', async () => {
+  it('refuse l’activation payante après l’essai sans paiement confirmé', async () => {
     const utilisateur = await creerUtilisateur(Role.ADMIN_TONTINE);
     await service.changerPlan(utilisateur.id, PlanAbonnement.STANDARD, Role.ADMIN_TONTINE);
-    const abonnement = await service.changerPlan(
-      utilisateur.id,
-      PlanAbonnement.STANDARD,
-      Role.ADMIN_TONTINE,
-    );
-
-    expect(abonnement).toMatchObject({
-      prixMensuel: 5000,
-      actif: true,
-      enEssai: false,
-    });
-    expect(dateAEnviron(abonnement.dateFin, 30)).toBe(true);
-    const transactions = await prisma.transaction.findMany({
-      where: { userId: utilisateur.id, type: TransactionType.ABONNEMENT },
-    });
-    expect(transactions).toHaveLength(1);
-    expect(transactions[0].montantBrut.toNumber()).toBe(5000);
-    expect(transactions[0].referenceExterne).toMatch(/^abon_sim_/);
+    await expect(
+      service.changerPlan(utilisateur.id, PlanAbonnement.STANDARD, Role.ADMIN_TONTINE),
+    ).rejects.toThrow(/paiement réel/i);
+    expect(
+      await prisma.transaction.count({
+        where: { userId: utilisateur.id, type: TransactionType.ABONNEMENT },
+      }),
+    ).toBe(0);
   });
 
-  it('n’offre qu’un seul essai, même en changeant de plan payant', async () => {
+  it('n’offre qu’un seul essai et refuse le plan payant suivant', async () => {
     const utilisateur = await creerUtilisateur(Role.ADMIN_TONTINE);
     await service.changerPlan(utilisateur.id, PlanAbonnement.STANDARD, Role.ADMIN_TONTINE);
-    const premium = await service.changerPlan(
-      utilisateur.id,
-      PlanAbonnement.PREMIUM,
-      Role.ADMIN_TONTINE,
-    );
-
-    expect(premium.enEssai).toBe(false);
-    expect(premium.prixMensuel).toBe(15000);
+    await expect(
+      service.changerPlan(utilisateur.id, PlanAbonnement.PREMIUM, Role.ADMIN_TONTINE),
+    ).rejects.toThrow(/paiement réel/i);
     expect(
       await prisma.transaction.count({
         where: { userId: utilisateur.id, type: TransactionType.ABONNEMENT },
@@ -282,7 +267,7 @@ describe('expiration et limites de création (Phase 6)', () => {
 });
 
 describe('renouvellement (Phase 6)', () => {
-  it('renouvelle un plan expiré par un paiement simulé et réaugmente la date de fin', async () => {
+  it('refuse le renouvellement sans paiement confirmé', async () => {
     const utilisateur = await creerUtilisateur(Role.ADMIN_TONTINE);
     await prisma.subscription.create({
       data: {
@@ -295,10 +280,7 @@ describe('renouvellement (Phase 6)', () => {
       },
     });
 
-    const renouvele = await service.renouveler(utilisateur.id);
-    expect(renouvele).toMatchObject({ actif: true, enEssai: false, prixMensuel: 5000 });
-    expect(dateAEnviron(renouvele.dateFin, 30)).toBe(true);
-    expect(await service.peutCreerTontine(utilisateur.id)).toBe(true);
+    await expect(service.renouveler(utilisateur.id)).rejects.toThrow(/paiement confirmé/i);
     expect(
       await prisma.transaction.count({
         where: { userId: utilisateur.id, type: TransactionType.ABONNEMENT },

@@ -4,14 +4,9 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { randomUUID } from 'crypto';
 import {
-  PaymentProvider,
   PlanAbonnement,
-  Prisma,
   Role,
-  TransactionStatus,
-  TransactionType,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -82,8 +77,15 @@ export class SubscriptionsService {
 
     const parametres = await lireParametresAbonnements(this.prisma);
     const prixPlan = this.getPrixPlan(plan, parametres);
+    if (prixPlan > 0) {
+      const existant = await this.prisma.subscription.findUnique({ where: { userId } });
+      if (existant?.aUtiliseEssai) {
+        throw new BadRequestException(
+          'Le paiement réel d’un abonnement n’est pas disponible dans cette version.',
+        );
+      }
+    }
     const maintenant = new Date();
-    const referenceExterne = `abon_sim_${randomUUID()}`;
 
     const abonnement = await this.prisma.$transaction(async (tx) => {
       // Sérialise les changements de plan d'un même utilisateur : sans ce
@@ -100,10 +102,6 @@ export class SubscriptionsService {
               maintenant,
               enEssai ? parametres.dureeEssaiJours : parametres.dureeAbonnementJours,
             );
-
-      if (prixMensuel > 0) {
-        await this.enregistrerPaiementSimule(tx, userId, prixMensuel, referenceExterne);
-      }
 
       return tx.subscription.upsert({
         where: { userId },
@@ -133,49 +131,22 @@ export class SubscriptionsService {
       plan,
       prixMensuel: Number(abonnement.prixMensuel),
       enEssai: abonnement.enEssai,
-      referenceExterne: abonnement.enEssai || prixPlan === 0 ? null : referenceExterne,
+      referenceExterne: null,
     });
 
     return this.formater(abonnement);
   }
 
-  /** Renouvelle un abonnement payant expiré via un paiement simulé. */
+  /** Refuse tout renouvellement sans confirmation de paiement externe. */
   async renouveler(userId: string): Promise<AbonnementResponse> {
     const abonnement = await this.prisma.subscription.findUnique({ where: { userId } });
     if (!abonnement) throw new NotFoundException('Aucun abonnement trouvé.');
     if (abonnement.plan === PlanAbonnement.GRATUIT) {
       throw new BadRequestException('Le plan gratuit n’a pas besoin d’être renouvelé.');
     }
-
-    const parametres = await lireParametresAbonnements(this.prisma);
-    const prixMensuel = this.getPrixPlan(abonnement.plan, parametres);
-    const referenceExterne = `abon_sim_${randomUUID()}`;
-
-    const renouvele = await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`abonnement_${userId}`}))`;
-      const courant = await tx.subscription.findUnique({ where: { userId } });
-      if (!courant) throw new NotFoundException('Aucun abonnement trouvé.');
-
-      await this.enregistrerPaiementSimule(tx, userId, prixMensuel, referenceExterne);
-      return tx.subscription.update({
-        where: { userId },
-        data: {
-          actif: true,
-          enEssai: false,
-          aUtiliseEssai: true,
-          prixMensuel,
-          dateFin: ajouterJoursUTC(new Date(), parametres.dureeAbonnementJours),
-        },
-      });
-    });
-
-    await this.audit.log('ABONNEMENT_RENOUVELÉ', renouvele.id, userId, {
-      plan: renouvele.plan,
-      prixMensuel,
-      referenceExterne,
-    });
-
-    return this.formater(renouvele);
+    throw new BadRequestException(
+      'Le renouvellement nécessite un paiement confirmé par une passerelle réelle.',
+    );
   }
 
   /** Annule l'abonnement de l'utilisateur. */
@@ -213,31 +184,6 @@ export class SubscriptionsService {
       default:
         return false;
     }
-  }
-
-  /**
-   * Paiement SIMULÉ : même point de sortie que les paiements de cotisation,
-   * mais aucun appel réseau. Montant entier FCFA, transaction auditée.
-   */
-  private async enregistrerPaiementSimule(
-    tx: Prisma.TransactionClient,
-    userId: string,
-    montant: number,
-    referenceExterne: string,
-  ): Promise<void> {
-    console.log(`[ABONNEMENT SIMULÉ] ${montant} FCFA pour ${userId} — ${referenceExterne}`);
-    await tx.transaction.create({
-      data: {
-        type: TransactionType.ABONNEMENT,
-        statut: TransactionStatus.REUSSIE,
-        provider: PaymentProvider.VIREMENT,
-        referenceExterne,
-        montantBrut: montant,
-        montantCommission: 0,
-        montantNet: montant,
-        userId,
-      },
-    });
   }
 
   private formater(abonnement: {
