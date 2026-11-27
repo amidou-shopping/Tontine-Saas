@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, FormEvent, Suspense } from 'react';
+import { useState, useEffect, type FormEvent, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   apiFetch,
@@ -9,6 +9,9 @@ import {
   setOtpUserId,
   clearOtpUserId,
 } from '@/lib/api';
+import AuthCard from '@/components/ui/AuthCard';
+import Button from '@/components/ui/Button';
+import Input from '@/components/ui/Input';
 
 function VerifyOtpForm() {
   const router = useRouter();
@@ -62,19 +65,21 @@ function VerifyOtpForm() {
         setErreur(
           extraireMessageErreur(
             data,
-            'Trop de demandes. Veuillez patienter avant de réessayer.',
+            'Trop de demandes. Patientez avant de demander un nouveau code.',
           ),
         );
         return;
       }
       if (!res.ok) {
-        setErreur(extraireMessageErreur(data, 'Impossible de renvoyer le code.'));
+        setErreur(
+          `${extraireMessageErreur(data, 'Impossible de renvoyer le code.')} Réessayez.`,
+        );
         return;
       }
-      setMessage('Un nouveau code a été envoyé à votre adresse email (logs du serveur en développement).');
+      setMessage('Un nouveau code a été envoyé à votre adresse email.');
     } catch (err) {
       console.error(err);
-      setErreur('Une erreur est survenue. Réessayez.');
+      setErreur('Envoi impossible. Vérifiez votre connexion internet, puis réessayez.');
     } finally {
       setRenvoiEnCours(false);
     }
@@ -93,7 +98,9 @@ function VerifyOtpForm() {
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        setErreur(extraireMessageErreur(data, 'Code invalide.'));
+        setErreur(
+          `${extraireMessageErreur(data, 'Code invalide.')} Vérifiez le code reçu ou demandez-en un nouveau.`,
+        );
         return;
       }
 
@@ -101,70 +108,73 @@ function VerifyOtpForm() {
       router.push('/login');
     } catch (err) {
       console.error(err);
-      setErreur('Une erreur est survenue. Réessayez.');
+      setErreur('Vérification impossible. Vérifiez votre connexion internet, puis réessayez.');
     } finally {
       setChargement(false);
     }
   }
 
   return (
-    <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-4 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-      <h1 className="text-xl font-bold text-gray-900">Vérification de l'email</h1>
-      <p className="text-sm text-gray-500">
-        Un code à 6 chiffres a été envoyé à l'adresse email utilisée lors de l'inscription.
-        En développement, il est affiché dans les logs du serveur backend (console).
-      </p>
-      {emailUrl && (
-        <p className="text-sm text-gray-700">
-          Code envoyé à <strong>{emailUrl}</strong>
-        </p>
-      )}
+    <AuthCard
+      titre="Vérifiez votre email"
+      description="Étape 2 sur 2 : saisissez le code à 6 chiffres envoyé par email."
+    >
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {emailUrl && (
+          <p className="text-body text-muted-canvas">
+            Code envoyé à <span className="font-semibold text-ink">{emailUrl}</span>
+          </p>
+        )}
 
-      {erreur && (
-        <div className="rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm p-3">{erreur}</div>
-      )}
-      {message && (
-        <div className="rounded-lg bg-green-50 border border-green-200 text-green-700 text-sm p-3">{message}</div>
-      )}
+        {erreur && (
+          <div role="alert" className="rounded-card border border-danger bg-danger-surface p-4 text-meta text-danger">
+            {erreur}
+          </div>
+        )}
+        {message && (
+          <div role="status" className="rounded-card border border-success bg-success-surface p-4 text-meta text-success">
+            {message}
+          </div>
+        )}
 
-      <div className="space-y-1">
-        <label className="text-sm text-gray-600">Code à 6 chiffres</label>
-        <input
+        <Input
+          label="Code à 6 chiffres"
           required
+          inputMode="numeric"
+          pattern="[0-9]{6}"
           maxLength={6}
+          autoComplete="one-time-code"
+          className="text-center text-lead tracking-widest tabular-nums"
           value={code}
           onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
-          className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm tracking-widest text-center text-lg"
-          placeholder="000000"
         />
-      </div>
 
-      <button type="submit" disabled={chargement} className="w-full rounded-xl bg-gray-900 text-white py-2.5 text-sm font-semibold disabled:opacity-40">
-        {chargement ? 'Vérification...' : 'Vérifier'}
-      </button>
+        <Button type="submit" disabled={chargement} className="w-full">
+          {chargement ? 'Vérification en cours...' : 'Vérifier le code'}
+        </Button>
 
-      <button
-        type="button"
-        onClick={renvoyerCode}
-        disabled={renvoiEnCours || attenteAvantRenvoi > 0}
-        className="w-full rounded-xl border border-gray-300 text-gray-700 py-2.5 text-sm font-semibold hover:bg-gray-50 disabled:opacity-40"
-      >
-        {renvoiEnCours
-          ? 'Envoi...'
-          : attenteAvantRenvoi > 0
-            ? `Renvoyer le code dans ${attenteAvantRenvoi}s`
-            : 'Renvoyer le code'}
-      </button>
-    </form>
+        <Button
+          variant="secondary"
+          type="button"
+          onClick={renvoyerCode}
+          disabled={renvoiEnCours || attenteAvantRenvoi > 0}
+          className="w-full"
+        >
+          {renvoiEnCours
+            ? 'Envoi en cours...'
+            : attenteAvantRenvoi > 0
+              ? `Renvoyer le code dans ${attenteAvantRenvoi} s`
+              : 'Renvoyer le code'}
+        </Button>
+      </form>
+    </AuthCard>
   );
 }
 
 export default function VerifyOtpPage() {
   return (
-    <div className="min-h-screen flex items-center justify-center px-4">
-      <Suspense fallback={<div className="text-gray-500">Chargement...</div>}>
-        <VerifyOtpForm />
-      </Suspense>
-    </div>
+    <Suspense fallback={<p className="p-8 text-center text-body text-muted-canvas">Chargement...</p>}>
+      <VerifyOtpForm />
+    </Suspense>
   );
 }

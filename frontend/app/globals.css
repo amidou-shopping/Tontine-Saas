@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  background-color: #f9fafb;
+@layer base {
+  body {
+    @apply bg-canvas font-sans text-body text-ink antialiased;
+  }
+}
+
+@layer components {
+  /* Focus visible universel : les éléments interactifs ajoutent cette classe. */
+  .focus-ring {
+    @apply focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink;
+  }
 }

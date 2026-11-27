@@ -1,17 +1,6 @@
-/**
- * MemberDashboard.tsx
- * ----------------------------------------------------------------------------
- * Tableau de bord d'un membre : vue de ses tontines en cours, sa prochaine
- * échéance, son tour de ramassage, et un bouton pour simuler le paiement
- * de sa cotisation via Mobile Money.
- *
- * Mobile-first, Tailwind CSS, App Router (Next.js 14+).
- * ----------------------------------------------------------------------------
- */
-
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -22,7 +11,24 @@ import {
   getToken,
   setSession,
 } from '@/lib/api';
+import { construireTours, formaterDate, formaterMontant, libelleType } from '@/lib/affichage';
+import { extraireCotisationsDues, type CotisationDue } from '@/lib/cotisations';
 import { JOURS_SEMAINE, LIBELLES_JOURS, texteDuree, type JourSemaine } from '@/lib/jours-semaine';
+import AccentCard from '@/components/ui/AccentCard';
+import Button, { buttonClasses } from '@/components/ui/Button';
+import Card from '@/components/ui/Card';
+import CotisationsAPayer from '@/components/CotisationsAPayer';
+import DataTable, { type Column } from '@/components/ui/DataTable';
+import Input from '@/components/ui/Input';
+import Modal from '@/components/ui/Modal';
+import PaymentModal from '@/components/ui/PaymentModal';
+import Select from '@/components/ui/Select';
+import StatTile from '@/components/ui/StatTile';
+import StatutBadge from '@/components/ui/StatutBadge';
+import SupportButton from '@/components/SupportButton';
+import Textarea from '@/components/ui/Textarea';
+import Toast from '@/components/ui/Toast';
+import TourCalendar from '@/components/ui/TourCalendar';
 
 interface Arriere {
   cycle: number;
@@ -35,20 +41,28 @@ interface Arriere {
 interface TontineResume {
   id: string;
   nom: string;
+  description?: string | null;
   montantCotisation: number;
-  frequence: 'QUOTIDIENNE' | 'HEBDOMADAIRE' | 'MENSUELLE';
-  prochainEcheance: string; // ISO date
-  monTour: number;          // Rang de passage du membre
-  cycleActuel: number;      // Tour en cours dans la tontine
+  frequence?: string;
+  prochainEcheance?: string;
+  monTour?: number;
+  cycleActuel?: number;
   statutCotisation: 'PAYE' | 'EN_ATTENTE' | 'EN_RETARD' | 'ARRIERE';
   arriere?: Arriere | null;
   codeInvitation?: string;
 }
 
-const PROVIDERS = [
-  { id: 'WAVE', label: 'Wave', couleur: 'bg-sky-500' },
-  { id: 'ORANGE_MONEY', label: 'Orange Money', couleur: 'bg-orange-500' },
-] as const;
+interface TransactionMembre {
+  id: string;
+  type: string;
+  statut: string;
+  montantBrut: number;
+  montantCommission: number;
+  montantNet: number;
+  createdAt: string;
+  tontineNom?: string | null;
+  [cle: string]: unknown;
+}
 
 interface TontineDisponible {
   id: string;
@@ -75,35 +89,66 @@ interface DemandeAdhesion {
   tontine: { id: string; nom: string; codeInvitation: string; statut: string };
 }
 
-export default function MemberDashboard({ role }: { role: string }) {
+interface MembreDetail {
+  membres: { userId: string; ordrePassage: number }[];
+}
+
+const PROVIDERS = [
+  { id: 'WAVE', label: 'Wave' },
+  { id: 'ORANGE_MONEY', label: 'Orange Money' },
+] as const;
+
+const COLONNES_ACTIVITES: Column<TransactionMembre>[] = [
+  { key: 'date', header: 'Date', render: (t) => formaterDate(t.createdAt) },
+  {
+    key: 'activite',
+    header: 'Activité',
+    render: (t) => (
+      <div>
+        <p className="font-medium text-ink">{libelleType(t.type)}</p>
+        <p className="text-meta text-muted-canvas">{t.tontineNom ?? 'Tontine'}</p>
+      </div>
+    ),
+  },
+  {
+    key: 'montant',
+    header: 'Montant',
+    align: 'right',
+    render: (t) => (
+      <span className="tabular-nums font-semibold">{formaterMontant(enNombre(t.montantNet))}</span>
+    ),
+  },
+  { key: 'statut', header: 'Statut', align: 'right', render: (t) => <StatutBadge statut={t.statut} /> },
+];
+
+export default function MemberDashboard({ role, prenom }: { role: string; prenom: string }) {
   const router = useRouter();
   const [tontines, setTontines] = useState<TontineResume[]>([]);
   const [tontinesDisponibles, setTontinesDisponibles] = useState<TontineDisponible[]>([]);
+  const [transactions, setTransactions] = useState<TransactionMembre[]>([]);
+  const [transactionsChargees, setTransactionsChargees] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [tontineEnPaiement, setTontineEnPaiement] = useState<string | null>(null);
-  const [providerChoisi, setProviderChoisi] = useState<string | null>(null);
+  const [cotisationEnPaiement, setCotisationEnPaiement] = useState<CotisationDue | null>(null);
   const [paiementEnCours, setPaiementEnCours] = useState(false);
-  const [cycleEnPaiement, setCycleEnPaiement] = useState<number | null>(null);
   const [messageSucces, setMessageSucces] = useState<string | null>(null);
   const [messageErreur, setMessageErreur] = useState<string | null>(null);
   const [rejoindreEnCours, setRejoindreEnCours] = useState<string | null>(null);
   const [roleActuel, setRoleActuel] = useState(role);
+  const [utilisateurConnecteId, setUtilisateurConnecteId] = useState<string | null>(null);
   const [devenirAdminEnCours, setDevenirAdminEnCours] = useState(false);
   const [fraisPassageAdmin, setFraisPassageAdmin] = useState<number | null>(null);
   const [providerPassageAdmin, setProviderPassageAdmin] = useState('WAVE');
   const [referencePassageAdmin, setReferencePassageAdmin] = useState<string | null>(null);
   const [demandes, setDemandes] = useState<DemandeAdhesion[]>([]);
+  const [tontineSelectionnee, setTontineSelectionnee] = useState('');
+  const [detailTontine, setDetailTontine] = useState<MembreDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailErreur, setDetailErreur] = useState<string | null>(null);
 
   const peutCreer = roleActuel === 'ADMIN_TONTINE' || roleActuel === 'SUPER_ADMIN';
-  // Le créateur est membre d'office : on ne lui propose pas de demander à
-  // rejoindre sa propre tontine (le serveur refuse aussi toutes les voies).
-  const utilisateurConnecteId = getCurrentUser<{ id: string }>()?.id;
   const prixPassageAdmin =
-    fraisPassageAdmin === null
-      ? '...'
-      : `${fraisPassageAdmin.toLocaleString('fr-FR')} F`;
+    fraisPassageAdmin === null ? '...' : formaterMontant(fraisPassageAdmin);
 
-  // États pour la création de tontine
   const [modalCreationOuverte, setModalCreationOuverte] = useState(false);
   const [creationEnCours, setCreationEnCours] = useState(false);
   const [nouvelleTontine, setNouvelleTontine] = useState<TontineCreee | null>(null);
@@ -115,16 +160,48 @@ export default function MemberDashboard({ role }: { role: string }) {
     nombreMaxMembres: '10',
   });
 
-  // États pour le code d'invitation
   const [codeInvitation, setCodeInvitation] = useState('');
   const [rejoindreParCodeEnCours, setRejoindreParCodeEnCours] = useState(false);
 
   useEffect(() => {
+    setUtilisateurConnecteId(getCurrentUser<{ id: string }>()?.id ?? null);
     fetchMesTontines();
     fetchTontinesDisponibles();
     fetchMesDemandes();
     fetchTarifPassageAdmin();
+    fetchTransactions();
   }, []);
+
+  useEffect(() => {
+    if (tontines.length > 0 && !tontines.some((t) => t.id === tontineSelectionnee)) {
+      setTontineSelectionnee(tontines[0].id);
+    }
+  }, [tontines, tontineSelectionnee]);
+
+  useEffect(() => {
+    if (!tontineSelectionnee) {
+      setDetailTontine(null);
+      return;
+    }
+    let actif = true;
+    setDetailLoading(true);
+    setDetailErreur(null);
+    apiFetch(`/api/member/tontines/${tontineSelectionnee}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error('Impossible de charger le calendrier.');
+        const data = (await res.json()) as MembreDetail;
+        if (actif) setDetailTontine(data);
+      })
+      .catch((err: Error) => {
+        if (actif) setDetailErreur(`${err.message} Réessayez en rouvrant la page.`);
+      })
+      .finally(() => {
+        if (actif) setDetailLoading(false);
+      });
+    return () => {
+      actif = false;
+    };
+  }, [tontineSelectionnee]);
 
   /** Prix serveur (FRAIS_PASSAGE_ADMIN ou valeur de la table singleton). */
   async function fetchTarifPassageAdmin() {
@@ -149,12 +226,33 @@ export default function MemberDashboard({ role }: { role: string }) {
       }
       if (!res.ok) throw new Error('Erreur de chargement des tontines');
       const data: TontineResume[] = await res.json();
-      // Les Decimal de Prisma arrivent en JSON sous forme de chaînes.
       setTontines(data.map((t) => ({ ...t, montantCotisation: enNombre(t.montantCotisation) })));
     } catch (err) {
       console.error(err);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function fetchTransactions() {
+    try {
+      const res = await apiFetch('/api/member/transactions');
+      if (!res.ok) throw new Error('Erreur de chargement des transactions');
+      const payload = (await res.json().catch(() => ({}))) ?? {};
+      const liste: unknown = Array.isArray(payload) ? payload : payload.data ?? [];
+      const transactionsRecues = Array.isArray(liste) ? (liste as TransactionMembre[]) : [];
+      setTransactions(
+        transactionsRecues.map((t) => ({
+          ...t,
+          montantBrut: enNombre(t.montantBrut),
+          montantCommission: enNombre(t.montantCommission),
+          montantNet: enNombre(t.montantNet),
+        })),
+      );
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setTransactionsChargees(true);
     }
   }
 
@@ -183,7 +281,7 @@ export default function MemberDashboard({ role }: { role: string }) {
    * serveur ; le rôle n'est accordé qu'après confirmation du paiement.
    */
   async function devenirAdmin() {
-    const prix = fraisPassageAdmin === null ? 'les frais' : `${fraisPassageAdmin} F`;
+    const prix = fraisPassageAdmin === null ? 'les frais' : formaterMontant(fraisPassageAdmin);
     if (
       !window.confirm(
         `Devenir administrateur de tontine : paiement unique de ${prix}. Le rôle sera activé après confirmation du paiement. Continuer ?`,
@@ -290,7 +388,7 @@ export default function MemberDashboard({ role }: { role: string }) {
     }
   }
 
-  async function creerTontine(e: React.FormEvent) {
+  async function creerTontine(e: FormEvent) {
     e.preventDefault();
     try {
       setCreationEnCours(true);
@@ -320,23 +418,14 @@ export default function MemberDashboard({ role }: { role: string }) {
     }
   }
 
-  /**
-   * Simule le paiement d'une cotisation via Mobile Money.
-   * En production, cet appel déclenche côté backend l'initialisation du
-   * paiement auprès du provider (Wave/Orange Money) puis attend le webhook
-   * de confirmation. Ici on simule directement une réponse REUSSIE.
-   */
-  async function payerCotisation(tontineId: string) {
-    if (!providerChoisi) return;
+  /** Simule le paiement d'une cotisation via Mobile Money (contrat API inchangé). */
+  async function payerCotisation(cotisation: CotisationDue, provider: string) {
     setMessageErreur(null);
     try {
       setPaiementEnCours(true);
-      const res = await apiFetch(`/api/member/tontines/${tontineId}/payer`, {
+      const res = await apiFetch(`/api/member/tontines/${cotisation.tontineId}/payer`, {
         method: 'POST',
-        body: JSON.stringify({
-          provider: providerChoisi,
-          ...(cycleEnPaiement ? { cycleConcerne: cycleEnPaiement } : {}),
-        }),
+        body: JSON.stringify({ provider, cycleConcerne: cotisation.cycle }),
       });
       if (!res.ok) {
         const payload = await res.json().catch(() => ({}));
@@ -344,14 +433,14 @@ export default function MemberDashboard({ role }: { role: string }) {
       }
 
       setMessageSucces(
-        cycleEnPaiement
-          ? 'Arriéré réglé. Vous pouvez maintenant payer le tour en cours.'
-          : 'Cotisation payée avec succès !',
+        cotisation.statut === 'EN_RETARD'
+          ? 'Arriéré réglé. Vous pouvez maintenant payer la cotisation suivante.'
+          : 'Cotisation payée.',
       );
-      setTontineEnPaiement(null);
-      setCycleEnPaiement(null);
-      setProviderChoisi(null);
-      fetchMesTontines(); // Rafraîchit l'état des échéances et l'arriéré
+      fermerPaiement();
+      // Rafraîchissement local : la liste se met à jour sans recharger la page.
+      await fetchMesTontines();
+      fetchTransactions();
     } catch (err: any) {
       console.error(err);
       setMessageErreur(err.message || 'Une erreur est survenue lors du paiement. Réessayez.');
@@ -360,453 +449,474 @@ export default function MemberDashboard({ role }: { role: string }) {
     }
   }
 
-  if (loading) {
-    return <div className="p-4 text-center text-gray-500">Chargement de vos tontines...</div>;
+  function ouvrirPaiement(cotisation: CotisationDue) {
+    setMessageErreur(null);
+    setCotisationEnPaiement(cotisation);
   }
 
+  function fermerPaiement() {
+    setCotisationEnPaiement(null);
+  }
+
+  if (loading) {
+    return (
+      <div className="mx-auto max-w-shell px-4 py-10 text-body text-muted-canvas">
+        Chargement de vos tontines...
+      </div>
+    );
+  }
+
+  const cotisationsDues = extraireCotisationsDues(tontines);
+  const cotisationUrgente = cotisationsDues[0];
+  const tontineEnReception = tontines.find(
+    (t) =>
+      typeof t.cycleActuel === 'number' &&
+      typeof t.monTour === 'number' &&
+      t.cycleActuel === t.monTour,
+  );
+  const tontineSelectionneeObj = tontines.find((t) => t.id === tontineSelectionnee);
+  const tours = tontineSelectionneeObj
+    ? construireTours(tontineSelectionneeObj, detailTontine?.membres)
+    : [];
+  const cotisationsPayees = transactions.filter(
+    (t) => t.type === 'COTISATION' && t.statut === 'REUSSIE',
+  ).length;
+  const montantRecu = transactions
+    .filter((t) => t.type === 'RAMASSAGE' && t.statut === 'REUSSIE')
+    .reduce((total, t) => total + enNombre(t.montantNet), 0);
+  const paiementsEnRetard = tontines.filter(
+    (t) => Boolean(t.arriere) || t.statutCotisation === 'EN_RETARD',
+  ).length;
+
   return (
-    <div className="max-w-md mx-auto px-4 py-6 space-y-6">
-      <h1 className="text-xl font-bold text-gray-900">Mes tontines</h1>
+    <div className="space-y-8">
+      <div>
+        <h1 className="font-display text-greeting font-semibold text-ink">
+          Bonjour {prenom || 'à vous'}
+        </h1>
+        <p className="mt-2 text-lead text-muted-canvas">Voici l’état de vos tontines.</p>
+      </div>
 
-      {messageSucces && (
-        <div className="rounded-lg bg-green-50 border border-green-200 text-green-700 text-sm p-3">
-          {messageSucces}
-        </div>
+      {(messageErreur || messageSucces) && (
+        <Toast
+          message={(messageErreur ?? messageSucces) as string}
+          ton={messageErreur ? 'danger' : 'succes'}
+          onFermer={() => {
+            setMessageErreur(null);
+            setMessageSucces(null);
+          }}
+        />
       )}
 
-      {messageErreur && (
-        <div
-          role="alert"
-          className="rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm p-3"
-        >
-          {messageErreur}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <Card className="p-5">
+          <p className="text-meta font-medium text-muted-canvas">Prochaine cotisation</p>
+          {cotisationUrgente ? (
+            <>
+              <p className="mt-3 font-display text-tile font-semibold tabular-nums text-ink">
+                {formaterMontant(cotisationUrgente.montant + cotisationUrgente.amende)}
+              </p>
+              <p className="mt-1 text-body text-muted-canvas">
+                {cotisationUrgente.tontineNom} · {formaterDate(cotisationUrgente.dateEcheance)}
+              </p>
+              {cotisationUrgente.amende > 0 && (
+                <p className="mt-2 text-meta text-danger">
+                  Dont amende : {formaterMontant(cotisationUrgente.amende)}
+                </p>
+              )}
+              <Link
+                href="#cotisations-a-payer"
+                className={buttonClasses('primary', 'mt-4 w-full')}
+              >
+                {cotisationsDues.length > 1
+                  ? `Voir les ${cotisationsDues.length} cotisations à payer`
+                  : 'Voir la cotisation à payer'}
+              </Link>
+            </>
+          ) : (
+            <p className="mt-3 text-body text-muted-canvas">Aucune cotisation à régler.</p>
+          )}
+        </Card>
+
+        {tontineEnReception && (
+          <AccentCard className="p-5">
+            <p className="text-meta font-medium text-surface">Vous recevez la cagnotte</p>
+            <p className="mt-3 font-display text-tile font-semibold">{tontineEnReception.nom}</p>
+            <p className="mt-1 text-body">
+              Tour {tontineEnReception.cycleActuel} · votre tour
+            </p>
+            <Link
+              href={`/tontines/${tontineEnReception.id}`}
+              className="mt-4 inline-flex min-h-control items-center rounded-pill border border-surface px-5 text-body font-semibold focus-ring"
+            >
+              Voir la tontine
+            </Link>
+          </AccentCard>
+        )}
+      </div>
+
+      <CotisationsAPayer
+        cotisations={cotisationsDues}
+        onPayer={ouvrirPaiement}
+        enCours={paiementEnCours}
+      />
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatTile libelle="Tontines en cours" valeur={String(tontines.length)} />
+        <StatTile
+          libelle="Cotisations payées"
+          valeur={transactionsChargees ? String(cotisationsPayees) : '...'}
+          detail={transactionsChargees ? undefined : 'Chargement en cours'}
+          ton="succes"
+        />
+        <StatTile
+          libelle="Montant reçu"
+          valeur={transactionsChargees ? formaterMontant(montantRecu) : '...'}
+          detail="Depuis vos transactions"
+        />
+        <StatTile
+          libelle="Paiements en retard"
+          valeur={String(paiementsEnRetard)}
+          detail={paiementsEnRetard > 0 ? 'À régler en priorité' : 'Rien à signaler'}
+          ton={paiementsEnRetard > 0 ? 'danger' : 'neutre'}
+        />
+      </div>
+
+      <Card className="p-5">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="font-display text-section font-semibold text-ink">Calendrier des tours</h2>
+            <p className="mt-1 text-body text-muted-canvas">
+              Suivez votre rang de passage et les tours à venir.
+            </p>
+          </div>
+          {tontines.length > 1 && (
+            <div className="sm:w-56">
+              <Select
+                label="Tontine"
+                value={tontineSelectionnee}
+                onChange={(e) => setTontineSelectionnee(e.target.value)}
+                options={tontines.map((t) => ({ value: t.id, label: t.nom }))}
+              />
+            </div>
+          )}
         </div>
-      )}
+
+        <div className="mt-5">
+          {detailLoading ? (
+            <p className="text-body text-muted-canvas">Chargement du calendrier...</p>
+          ) : detailErreur ? (
+            <div role="alert" className="rounded-card border border-danger bg-danger-surface p-4 text-body text-danger">
+              {detailErreur}
+            </div>
+          ) : tours.length > 0 ? (
+            <TourCalendar tours={tours} />
+          ) : (
+            <p className="text-body text-muted-canvas">Le calendrier n’est pas encore disponible.</p>
+          )}
+        </div>
+      </Card>
+
+      <section>
+        <h2 className="font-display text-section font-semibold text-ink">Activités récentes</h2>
+        <div className="mt-4">
+          <DataTable
+            columns={COLONNES_ACTIVITES}
+            rows={transactions.slice(0, 5)}
+            getRowKey={(t) => t.id}
+            caption="Vos cinq dernières transactions"
+            vide={
+              transactionsChargees
+                ? 'Aucune activité pour le moment.'
+                : 'Chargement des activités...'
+            }
+          />
+        </div>
+      </section>
+
+      <Card className="p-5">
+        <h2 className="font-display text-section font-semibold text-ink">Codes d’invitation</h2>
+        {tontines.filter((t) => t.codeInvitation).length === 0 ? (
+          <p className="mt-2 text-body text-muted-canvas">Aucun code disponible.</p>
+        ) : (
+          <div className="mt-4 flex flex-wrap gap-3">
+            {tontines
+              .filter((t) => t.codeInvitation)
+              .map((t) => (
+                <div key={t.id} className="rounded-card border border-line bg-canvas p-3">
+                  <p className="text-meta text-muted-canvas">{t.nom}</p>
+                  <p className="mt-1 select-all text-body font-semibold tabular-nums text-ink">
+                    {t.codeInvitation}
+                  </p>
+                </div>
+              ))}
+          </div>
+        )}
+        <div className="mt-5 border-t border-line pt-5">
+          <SupportButton variante="section" />
+        </div>
+      </Card>
 
       {/* Création réservée aux ADMIN_TONTINE / SUPER_ADMIN */}
-      {peutCreer ? (
-        <button
-          onClick={() => setModalCreationOuverte(true)}
-          className="w-full rounded-xl bg-sky-600 text-white py-3 text-sm font-semibold hover:bg-sky-700 transition"
-        >
-          + Créer une tontine
-        </button>
-      ) : (
-        <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 space-y-2">
-          <p className="text-sm font-semibold text-sky-900">Vous êtes membre</p>
-          <p className="text-xs text-sky-800">
-            Seuls les administrateurs peuvent créer une tontine. Le passage au rôle Admin coûte{' '}
-            <strong>{prixPassageAdmin}</strong> (paiement unique, non remboursable). Votre numéro de
-            téléphone doit être vérifié. Vous pouvez aussi demander à rejoindre une tontine
-            existante.
-          </p>
-          <div className="flex gap-2" aria-label="Moyen de paiement">
-            {PROVIDERS.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => setProviderPassageAdmin(p.id)}
-                className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${
-                  providerPassageAdmin === p.id
-                    ? 'border-sky-600 bg-white text-sky-700'
-                    : 'border-sky-200 text-sky-800'
-                }`}
-              >
-                {p.label}
-              </button>
-            ))}
+      {peutCreer && (
+        <Card className="p-5">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="font-display text-section font-semibold text-ink">Créer une tontine</h2>
+              <p className="mt-1 text-body text-muted-canvas">
+                Vous pouvez ouvrir une nouvelle tontine.
+              </p>
+            </div>
+            <Button onClick={() => setModalCreationOuverte(true)}>Créer une tontine</Button>
           </div>
+        </Card>
+      )}
+
+      {!peutCreer && (
+        <Card className="p-5">
+          <h2 className="font-display text-section font-semibold text-ink">Devenir administrateur</h2>
+          <p className="mt-2 text-body text-muted-canvas">
+            Seuls les administrateurs peuvent créer une tontine. Le passage coûte{' '}
+            {prixPassageAdmin}, en paiement unique. Votre numéro de téléphone doit être vérifié.
+          </p>
+          <fieldset className="mt-4">
+            <legend className="text-body font-medium text-ink">Moyen de paiement</legend>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {PROVIDERS.map((p) => (
+                <Button
+                  key={p.id}
+                  variant={providerPassageAdmin === p.id ? 'primary' : 'secondary'}
+                  aria-pressed={providerPassageAdmin === p.id}
+                  onClick={() => setProviderPassageAdmin(p.id)}
+                >
+                  {p.label}
+                </Button>
+              ))}
+            </div>
+          </fieldset>
           {referencePassageAdmin && (
-            <button
-              type="button"
-              onClick={() => confirmerPassageAdmin(referencePassageAdmin)}
+            <Button
+              variant="secondary"
+              className="mt-4"
               disabled={devenirAdminEnCours}
-              className="w-full rounded-xl border border-sky-600 bg-white text-sky-700 py-2.5 text-sm font-semibold hover:bg-sky-100 disabled:opacity-40"
+              onClick={() => confirmerPassageAdmin(referencePassageAdmin)}
             >
               Confirmer le paiement ({prixPassageAdmin})
-            </button>
+            </Button>
           )}
-          <button
+          <Button
+            className="mt-4"
             onClick={devenirAdmin}
             disabled={devenirAdminEnCours || referencePassageAdmin !== null}
-            className="w-full rounded-xl bg-sky-600 text-white py-2.5 text-sm font-semibold hover:bg-sky-700 disabled:opacity-40"
           >
             {devenirAdminEnCours
               ? 'Patientez...'
               : referencePassageAdmin
                 ? 'Paiement en attente de confirmation'
                 : `Devenir Admin — ${prixPassageAdmin}`}
-          </button>
-        </div>
+          </Button>
+        </Card>
       )}
 
-      {/* Modal de création de tontine */}
-      {peutCreer && modalCreationOuverte && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-sm space-y-4">
-            <h2 className="text-lg font-bold text-gray-900">Créer une tontine</h2>
-            <form onSubmit={creerTontine} className="space-y-3">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Nom *</label>
-                <input
-                  type="text"
-                  required
-                  value={formTontine.nom}
-                  onChange={(e) => setFormTontine({ ...formTontine, nom: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-                  placeholder="Ex: Tontine des Amies"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
-                <textarea
-                  value={formTontine.description}
-                  onChange={(e) => setFormTontine({ ...formTontine, description: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-                  rows={2}
-                  placeholder="Objectif de la tontine..."
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Montant cotisation (FCFA) *</label>
-                <input
-                  type="number"
-                  required
-                  min="100"
-                  value={formTontine.montantCotisation}
-                  onChange={(e) => setFormTontine({ ...formTontine, montantCotisation: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-                  placeholder="Ex: 10000"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Jour de cotisation *</label>
-                <select
-                  value={formTontine.jourCotisation}
-                  onChange={(e) =>
-                    setFormTontine({ ...formTontine, jourCotisation: e.target.value as JourSemaine })
-                  }
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-                >
-                  {JOURS_SEMAINE.map((jour) => (
-                    <option key={jour} value={jour}>
-                      {LIBELLES_JOURS[jour][0].toUpperCase() + LIBELLES_JOURS[jour].slice(1)}
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1 text-[11px] text-gray-500">
-                  Une cotisation chaque semaine, le {LIBELLES_JOURS[formTontine.jourCotisation]}.
-                </p>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Nombre max de membres *</label>
-                <input
-                  type="number"
-                  required
-                  min="2"
-                  max="50"
-                  value={formTontine.nombreMaxMembres}
-                  onChange={(e) => setFormTontine({ ...formTontine, nombreMaxMembres: e.target.value })}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
-                />
-                <p className="mt-1 text-[11px] text-sky-700">
-                  {texteDuree(formTontine.nombreMaxMembres, formTontine.jourCotisation)}
-                </p>
-              </div>
-              <div className="flex gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setModalCreationOuverte(false)}
-                  className="flex-1 rounded-lg border border-gray-300 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-                >
-                  Annuler
-                </button>
-                <button
-                  type="submit"
-                  disabled={creationEnCours}
-                  className="flex-1 rounded-lg bg-sky-600 text-white py-2 text-sm font-semibold hover:bg-sky-700 disabled:opacity-40"
-                >
-                  {creationEnCours ? 'Création...' : 'Créer'}
-                </button>
-              </div>
-            </form>
+      <Card className="p-5">
+        <h2 className="font-display text-section font-semibold text-ink">Demander à rejoindre</h2>
+        <p className="mt-1 text-body text-muted-canvas">
+          L’administrateur doit accepter votre demande avant votre entrée dans la tontine.
+        </p>
+        <form
+          className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end"
+          onSubmit={(e) => {
+            e.preventDefault();
+            rejoindreParCode();
+          }}
+        >
+          <div className="flex-1">
+            <Input
+              label="Code d’invitation"
+              value={codeInvitation}
+              onChange={(e) => setCodeInvitation(e.target.value.toUpperCase())}
+              maxLength={8}
+              placeholder="A1B2C3D4"
+            />
           </div>
-        </div>
+          <Button type="submit" disabled={!codeInvitation.trim() || rejoindreParCodeEnCours}>
+            {rejoindreParCodeEnCours ? 'Envoi...' : 'Demander'}
+          </Button>
+        </form>
+      </Card>
+
+      {demandes.length > 0 && (
+        <Card className="p-5">
+          <h2 className="font-display text-section font-semibold text-ink">Mes demandes d’adhésion</h2>
+          <div className="mt-4 space-y-3">
+            {demandes.map((d) => (
+              <div key={d.id} className="rounded-card border border-line bg-canvas p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <p className="font-medium text-ink">{d.tontine.nom}</p>
+                  <StatutBadge statut={d.statut} />
+                </div>
+                <p className="mt-1 text-meta text-muted-canvas">
+                  Demandée le {formaterDate(d.createdAt)}
+                  {d.statut === 'EN_ATTENTE' ? ' · en attente de validation' : ''}
+                </p>
+                {d.motifRefus && <p className="mt-2 text-meta text-danger">Motif : {d.motifRefus}</p>}
+              </div>
+            ))}
+          </div>
+        </Card>
       )}
 
-      {/* Modal de confirmation avec code d'invitation */}
-      {nouvelleTontine && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-sm space-y-4 text-center">
-            <div className="text-4xl">🎉</div>
-            <h2 className="text-lg font-bold text-gray-900">Tontine créée !</h2>
-            <p className="text-sm text-gray-600">
-              Partage ce code d'invitation avec tes amis pour qu'ils rejoignent ta tontine :
+      <section className="space-y-4">
+        <h2 className="font-display text-section font-semibold text-ink">Tontines disponibles</h2>
+        {tontinesDisponibles.length === 0 ? (
+          <Card className="p-5 text-body text-muted-canvas">
+            Aucune tontine n’attend de nouveaux membres.
+          </Card>
+        ) : (
+          tontinesDisponibles.map((t) => (
+            <Card key={t.id} className="p-5">
+              <h3 className="font-display text-lead font-semibold text-ink">{t.nom}</h3>
+              {t.description && <p className="mt-1 text-body text-muted-canvas">{t.description}</p>}
+              <dl className="mt-4 space-y-2 text-body">
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-canvas">Cotisation</dt>
+                  <dd className="tabular-nums font-semibold">{formaterMontant(t.montantCotisation)}</dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-muted-canvas">Membres</dt>
+                  <dd className="tabular-nums font-semibold">
+                    {t._count.membres}/{t.nombreMaxMembres}
+                  </dd>
+                </div>
+              </dl>
+              {t.createurId === utilisateurConnecteId ? (
+                <p className="mt-4 text-body font-medium text-ink">
+                  Vous êtes membre créateur de cette tontine.
+                </p>
+              ) : (
+                <Button
+                  className="mt-4 w-full"
+                  onClick={() => rejoindreTontine(t.id)}
+                  disabled={rejoindreEnCours === t.id}
+                >
+                  {rejoindreEnCours === t.id ? 'Envoi...' : 'Demander à rejoindre'}
+                </Button>
+              )}
+            </Card>
+          ))
+        )}
+      </section>
+
+      {/* Paiement : récapitulatif lisible, deux étapes maximum. */}
+      <PaymentModal
+        ouvert={cotisationEnPaiement !== null}
+        onFermer={fermerPaiement}
+        tontineNom={cotisationEnPaiement?.tontineNom}
+        montantCotisation={cotisationEnPaiement?.montant ?? 0}
+        amende={cotisationEnPaiement?.amende ?? 0}
+        total={
+          cotisationEnPaiement
+            ? cotisationEnPaiement.montant + cotisationEnPaiement.amende
+            : 0
+        }
+        cycleConcerne={cotisationEnPaiement?.cycle ?? null}
+        enCours={paiementEnCours}
+        onConfirmer={(provider) => {
+          if (cotisationEnPaiement) void payerCotisation(cotisationEnPaiement, provider);
+        }}
+      />
+
+      <Modal
+        ouvert={modalCreationOuverte}
+        onFermer={() => setModalCreationOuverte(false)}
+        titre="Créer une tontine"
+      >
+        <form onSubmit={creerTontine} className="space-y-4">
+          <Input
+            label="Nom de la tontine"
+            required
+            value={formTontine.nom}
+            onChange={(e) => setFormTontine({ ...formTontine, nom: e.target.value })}
+          />
+          <Textarea
+            label="Description"
+            rows={2}
+            value={formTontine.description}
+            onChange={(e) => setFormTontine({ ...formTontine, description: e.target.value })}
+          />
+          <Input
+            label="Montant de la cotisation (F)"
+            type="number"
+            required
+            min={100}
+            value={formTontine.montantCotisation}
+            onChange={(e) => setFormTontine({ ...formTontine, montantCotisation: e.target.value })}
+          />
+          <Select
+            label="Jour de cotisation"
+            value={formTontine.jourCotisation}
+            onChange={(e) =>
+              setFormTontine({ ...formTontine, jourCotisation: e.target.value as JourSemaine })
+            }
+            options={JOURS_SEMAINE.map((jour) => ({
+              value: jour,
+              label: LIBELLES_JOURS[jour].charAt(0).toUpperCase() + LIBELLES_JOURS[jour].slice(1),
+            }))}
+            aide={`Une cotisation chaque ${LIBELLES_JOURS[formTontine.jourCotisation]}.`}
+          />
+          <Input
+            label="Nombre maximum de membres"
+            type="number"
+            required
+            min={2}
+            max={50}
+            value={formTontine.nombreMaxMembres}
+            onChange={(e) => setFormTontine({ ...formTontine, nombreMaxMembres: e.target.value })}
+            aide={texteDuree(formTontine.nombreMaxMembres, formTontine.jourCotisation)}
+          />
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Button
+              variant="secondary"
+              className="flex-1"
+              onClick={() => setModalCreationOuverte(false)}
+            >
+              Annuler
+            </Button>
+            <Button type="submit" className="flex-1" disabled={creationEnCours}>
+              {creationEnCours ? 'Création en cours...' : 'Créer'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        ouvert={nouvelleTontine !== null}
+        onFermer={() => setNouvelleTontine(null)}
+        titre="Tontine créée"
+      >
+        {nouvelleTontine && (
+          <div className="space-y-4">
+            <p className="text-body text-muted-canvas">
+              Partagez ce code avec les personnes à inviter :
             </p>
-            <div className="bg-gray-100 rounded-xl py-4 px-6">
-              <p className="text-2xl font-mono font-bold text-sky-600 tracking-wider">
-                {nouvelleTontine.codeInvitation}
-              </p>
-            </div>
-            <p className="text-xs text-gray-400">
+            <p className="select-all rounded-card border border-line bg-canvas p-4 text-center font-display text-tile font-semibold tracking-wider text-ink">
+              {nouvelleTontine.codeInvitation}
+            </p>
+            <p className="break-all text-meta text-muted-canvas">
               Lien d’invitation :{' '}
               <Link
                 href={`/join/${nouvelleTontine.codeInvitation}`}
-                className="text-sky-600 underline break-all"
+                className="rounded-pill font-semibold text-ink underline focus-ring"
               >
                 /join/{nouvelleTontine.codeInvitation}
               </Link>
             </p>
-            <button
-              onClick={() => setNouvelleTontine(null)}
-              className="w-full rounded-lg bg-sky-600 text-white py-2.5 text-sm font-semibold hover:bg-sky-700"
-            >
+            <Button className="w-full" onClick={() => setNouvelleTontine(null)}>
               Fermer
-            </button>
+            </Button>
           </div>
-        </div>
-      )}
-
-      {/* Section : demander à rejoindre via code d'invitation */}
-      <div className="rounded-2xl border border-gray-200 shadow-sm p-4 bg-white space-y-3">
-        <h2 className="text-sm font-semibold text-gray-700">
-          Demander à rejoindre via un code
-        </h2>
-        <p className="text-xs text-gray-500">
-          L’administrateur de la tontine doit accepter votre demande avant votre entrée effective.
-        </p>
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={codeInvitation}
-            onChange={(e) => setCodeInvitation(e.target.value.toUpperCase())}
-            placeholder="Ex: A1B2C3D4"
-            className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-sky-500"
-            maxLength={8}
-          />
-          <button
-            onClick={rejoindreParCode}
-            disabled={!codeInvitation.trim() || rejoindreParCodeEnCours}
-            className="rounded-lg bg-gray-900 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40"
-          >
-            {rejoindreParCodeEnCours ? '...' : 'Demander'}
-          </button>
-        </div>
-      </div>
-
-      {/* Suivi des demandes envoyées */}
-      {demandes.length > 0 && (
-        <div className="rounded-2xl border border-gray-200 shadow-sm p-4 bg-white space-y-3">
-          <h2 className="text-sm font-semibold text-gray-700">Mes demandes d’adhésion</h2>
-          {demandes.map((d) => (
-            <div key={d.id} className="rounded-xl border border-gray-100 p-3 space-y-1">
-              <div className="flex justify-between items-start gap-2">
-                <p className="text-sm font-medium text-gray-900">{d.tontine.nom}</p>
-                <span
-                  className={`text-[11px] font-medium px-2 py-1 rounded-full ${
-                    d.statut === 'ACCEPTEE'
-                      ? 'bg-green-100 text-green-700'
-                      : d.statut === 'REFUSEE'
-                        ? 'bg-red-100 text-red-700'
-                        : 'bg-yellow-100 text-yellow-700'
-                  }`}
-                >
-                  {d.statut === 'EN_ATTENTE'
-                    ? 'En attente'
-                    : d.statut === 'ACCEPTEE'
-                      ? 'Acceptée'
-                      : 'Refusée'}
-                </span>
-              </div>
-              <p className="text-xs text-gray-500">
-                Demandée le {new Date(d.createdAt).toLocaleDateString('fr-FR')}
-                {d.statut === 'EN_ATTENTE' && ' · en attente de validation par l’administrateur'}
-              </p>
-              {d.motifRefus && (
-                <p className="text-xs text-red-600">Motif : {d.motifRefus}</p>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {tontines.length === 0 && (
-        <p className="text-gray-500 text-sm">Vous ne participez à aucune tontine pour le moment.</p>
-      )}
-
-      {tontines.map((t) => (
-        <div
-          key={t.id}
-          role="button"
-          tabIndex={0}
-          aria-label={`Voir le détail de la tontine ${t.nom}`}
-          onClick={() => router.push(`/tontines/${t.id}`)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              router.push(`/tontines/${t.id}`);
-            }
-          }}
-          className="rounded-2xl border border-gray-200 shadow-sm p-4 bg-white space-y-3 cursor-pointer hover:border-sky-300 hover:shadow-md transition"
-        >
-          <div className="flex justify-between items-start">
-            <div>
-              <h2 className="font-semibold text-gray-900">{t.nom}</h2>
-              <p className="text-xs text-gray-500">
-                Cycle {t.cycleActuel} · Votre tour : #{t.monTour}
-              </p>
-            </div>
-            <StatutBadge statut={t.statutCotisation} />
-          </div>
-
-          {t.arriere && (
-            <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-700 space-y-1">
-              <p className="font-semibold">Impayé : tour {t.arriere.cycle}</p>
-              <p>
-                {t.arriere.montantTotal.toLocaleString('fr-FR')} FCFA à régler
-                {t.arriere.amende > 0
-                  ? ` (cotisation + ${t.arriere.amende.toLocaleString('fr-FR')} FCFA d'amende)`
-                  : ' (aucune amende pendant le délai de grâce)'}
-                .
-              </p>
-              <p>Vous devez régler cet arriéré avant de payer le tour {t.cycleActuel}.</p>
-            </div>
-          )}
-
-          <div className="flex justify-between text-sm">
-            <span className="text-gray-500">Cotisation</span>
-            <span className="font-medium text-gray-900">
-              {t.montantCotisation.toLocaleString('fr-FR')} FCFA
-            </span>
-          </div>
-
-          <div className="flex justify-between text-sm">
-            <span className="text-gray-500">Prochaine échéance</span>
-            <span className="font-medium text-gray-900">
-              {new Date(t.prochainEcheance).toLocaleDateString('fr-FR')}
-            </span>
-          </div>
-
-          <p className="text-xs text-sky-600 font-medium">Voir le détail →</p>
-
-          {t.codeInvitation && (
-            <div className="bg-gray-50 rounded-lg p-2 text-center">
-              <p className="text-xs text-gray-500">Code d'invitation</p>
-              <p className="text-sm font-mono font-bold text-sky-600">{t.codeInvitation}</p>
-            </div>
-          )}
-
-          {(t.statutCotisation !== 'PAYE' || Boolean(t.arriere)) && (
-            <>
-              {tontineEnPaiement === t.id ? (
-                <div
-                  className="space-y-2 pt-2 border-t border-gray-100"
-                  onClick={(e) => e.stopPropagation()}
-                  onKeyDown={(e) => e.stopPropagation()}
-                >
-                  <p className="text-xs text-gray-500">Choisissez votre moyen de paiement :</p>
-                  <p className="text-xs font-medium text-gray-800">
-                    Montant :{' '}
-                    {(t.arriere?.montantTotal ?? t.montantCotisation).toLocaleString('fr-FR')} FCFA
-                  </p>
-                  <div className="flex gap-2">
-                    {PROVIDERS.map((p) => (
-                      <button
-                        key={p.id}
-                        onClick={() => setProviderChoisi(p.id)}
-                        className={`flex-1 rounded-xl py-2 text-sm font-medium text-white transition ${p.couleur} ${
-                          providerChoisi === p.id ? 'ring-2 ring-offset-2 ring-gray-800' : 'opacity-80'
-                        }`}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    disabled={!providerChoisi || paiementEnCours}
-                    onClick={() => payerCotisation(t.id)}
-                    className="w-full rounded-xl bg-gray-900 text-white py-2.5 text-sm font-semibold disabled:opacity-40"
-                  >
-                    {paiementEnCours ? 'Traitement...' : 'Confirmer le paiement'}
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setTontineEnPaiement(t.id);
-                    setCycleEnPaiement(t.arriere?.cycle ?? null);
-                  }}
-                  className="w-full rounded-xl bg-gray-900 text-white py-2.5 text-sm font-semibold"
-                >
-                  {t.arriere
-                    ? `Régler l'arriéré (${t.arriere.montantTotal.toLocaleString('fr-FR')} FCFA)`
-                    : 'Payer ma cotisation'}
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      ))}
-
-      {/* Section : Découvrir les tontines disponibles */}
-      <div className="space-y-3">
-        <h2 className="text-sm font-semibold text-gray-700">Tontines disponibles</h2>
-        {tontinesDisponibles.length === 0 && (
-          <p className="text-gray-400 text-sm">Aucune tontine en attente de membres.</p>
         )}
-        {tontinesDisponibles.map((t) => (
-          <div key={t.id} className="rounded-2xl border border-gray-200 shadow-sm p-4 bg-white space-y-2">
-            <h3 className="font-semibold text-gray-900">{t.nom}</h3>
-            {t.description && <p className="text-xs text-gray-500">{t.description}</p>}
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-500">Cotisation</span>
-              <span className="font-medium text-gray-900">
-                {t.montantCotisation.toLocaleString('fr-FR')} FCFA / {t.frequence.toLowerCase()}
-              </span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-500">Membres</span>
-              <span className="font-medium text-gray-900">
-                {t._count.membres}/{t.nombreMaxMembres}
-              </span>
-            </div>
-            {t.createurId === utilisateurConnecteId ? (
-              <p className="text-xs font-medium text-sky-700">
-                Vous êtes membre créateur de cette tontine.
-              </p>
-            ) : (
-              <button
-                onClick={() => rejoindreTontine(t.id)}
-                disabled={rejoindreEnCours === t.id}
-                className="w-full rounded-xl bg-gray-900 text-white py-2 text-sm font-semibold disabled:opacity-40"
-              >
-                {rejoindreEnCours === t.id ? 'Envoi...' : 'Demander à rejoindre'}
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
+      </Modal>
     </div>
-  );
-}
-
-function StatutBadge({ statut }: { statut: TontineResume['statutCotisation'] }) {
-  const styles: Record<typeof statut, string> = {
-    PAYE: 'bg-green-100 text-green-700',
-    EN_ATTENTE: 'bg-yellow-100 text-yellow-700',
-    EN_RETARD: 'bg-red-100 text-red-700',
-    ARRIERE: 'bg-red-100 text-red-700',
-  };
-  const labels: Record<typeof statut, string> = {
-    PAYE: 'Payé',
-    EN_ATTENTE: 'En attente',
-    EN_RETARD: 'En retard',
-    ARRIERE: 'Arriéré',
-  };
-  return (
-    <span className={`text-xs font-medium px-2 py-1 rounded-full ${styles[statut]}`}>
-      {labels[statut]}
-    </span>
   );
 }

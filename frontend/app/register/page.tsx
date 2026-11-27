@@ -1,8 +1,12 @@
 'use client';
 
-import { useState, FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { apiFetch, extraireMessageErreur, setOtpUserId } from '@/lib/api';
+import AuthCard from '@/components/ui/AuthCard';
+import Button from '@/components/ui/Button';
+import Input from '@/components/ui/Input';
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -26,7 +30,7 @@ export default function RegisterPage() {
       const data = await res.json();
 
       if (!res.ok) {
-        setErreur(extraireMessageErreur(data, 'Inscription impossible.'));
+        setErreur(extraireMessageErreur(data, 'Inscription impossible. Vérifiez les champs indiqués.'));
         return;
       }
 
@@ -35,51 +39,82 @@ export default function RegisterPage() {
       router.push(`/verify-otp?userId=${data.userId}&email=${encodeURIComponent(form.email)}`);
     } catch (err) {
       console.error(err);
-      setErreur('Une erreur est survenue. Réessayez.');
+      setErreur('Inscription impossible. Vérifiez votre connexion internet, puis réessayez.');
     } finally {
       setChargement(false);
     }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 py-8">
-      <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-4 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-        <h1 className="text-xl font-bold text-gray-900">Créer un compte</h1>
-
+    <AuthCard
+      titre="Créer un compte"
+      description="Quelques informations suffisent pour commencer."
+      lien={
+        <>
+          Vous avez déjà un compte ?{' '}
+          <Link href="/login" className="rounded-pill font-semibold text-ink underline focus-ring">
+            Se connecter
+          </Link>
+        </>
+      }
+    >
+      <form onSubmit={handleSubmit} className="space-y-4">
         {erreur && (
-          <div className="rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm p-3">{erreur}</div>
+          <div role="alert" className="rounded-card border border-danger bg-danger-surface p-4 text-meta text-danger">
+            {erreur}
+          </div>
         )}
 
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1">
-            <label className="text-sm text-gray-600">Prénom</label>
-            <input required value={form.prenom} onChange={(e) => update('prenom', e.target.value)} className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm" />
-          </div>
-          <div className="space-y-1">
-            <label className="text-sm text-gray-600">Nom</label>
-            <input required value={form.nom} onChange={(e) => update('nom', e.target.value)} className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm" />
-          </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Input
+            label="Prénom"
+            required
+            autoComplete="given-name"
+            value={form.prenom}
+            onChange={(e) => update('prenom', e.target.value)}
+          />
+          <Input
+            label="Nom"
+            required
+            autoComplete="family-name"
+            value={form.nom}
+            onChange={(e) => update('nom', e.target.value)}
+          />
         </div>
 
-        <div className="space-y-1">
-          <label className="text-sm text-gray-600">Email</label>
-          <input type="email" required value={form.email} onChange={(e) => update('email', e.target.value)} className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm" placeholder="vous@exemple.com" />
-        </div>
+        <Input
+          label="Email"
+          type="email"
+          required
+          autoComplete="email"
+          value={form.email}
+          onChange={(e) => update('email', e.target.value)}
+        />
 
-        <div className="space-y-1">
-          <label className="text-sm text-gray-600">Téléphone</label>
-          <input required value={form.telephone} onChange={(e) => update('telephone', e.target.value)} className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm" placeholder="+221771234567" />
-        </div>
+        <Input
+          label="Téléphone"
+          type="tel"
+          required
+          autoComplete="tel"
+          value={form.telephone}
+          onChange={(e) => update('telephone', e.target.value)}
+        />
 
-        <div className="space-y-1">
-          <label className="text-sm text-gray-600">Mot de passe</label>
-          <input type="password" required minLength={8} value={form.password} onChange={(e) => update('password', e.target.value)} className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm" placeholder="8 caractères minimum" />
-        </div>
+        <Input
+          label="Mot de passe"
+          type="password"
+          required
+          minLength={8}
+          autoComplete="new-password"
+          aide="8 caractères minimum."
+          value={form.password}
+          onChange={(e) => update('password', e.target.value)}
+        />
 
-        <button type="submit" disabled={chargement} className="w-full rounded-xl bg-gray-900 text-white py-2.5 text-sm font-semibold disabled:opacity-40">
-          {chargement ? 'Création...' : 'Créer mon compte'}
-        </button>
+        <Button type="submit" disabled={chargement} className="w-full">
+          {chargement ? 'Création en cours...' : 'Créer mon compte'}
+        </Button>
       </form>
-    </div>
+    </AuthCard>
   );
 }

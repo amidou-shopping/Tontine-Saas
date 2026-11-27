@@ -1,9 +1,20 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter, useParams } from 'next/navigation';
-import { apiFetch, getCurrentUser, enNombre } from '@/lib/api';
+import { apiFetch, enNombre, extraireMessageErreur, getCurrentUser } from '@/lib/api';
+import { construireTours, formaterDate, formaterMontant, libelleType } from '@/lib/affichage';
 import { LIBELLES_JOURS, type JourSemaine } from '@/lib/jours-semaine';
+import AccentCard from '@/components/ui/AccentCard';
+import Button, { buttonClasses } from '@/components/ui/Button';
+import Card from '@/components/ui/Card';
+import DataTable, { type Column } from '@/components/ui/DataTable';
+import EmptyState from '@/components/ui/EmptyState';
+import PaymentModal from '@/components/ui/PaymentModal';
+import StatutBadge from '@/components/ui/StatutBadge';
+import Toast from '@/components/ui/Toast';
+import TourCalendar from '@/components/ui/TourCalendar';
 
 interface MembreTontine {
   id: string;
@@ -32,6 +43,17 @@ interface Transaction {
   createdAt: string;
 }
 
+interface ResumeTontine {
+  id: string;
+  montantCotisation: number;
+  statutCotisation: 'PAYE' | 'EN_ATTENTE' | 'EN_RETARD' | 'ARRIERE';
+  arriere?: {
+    cycle: number;
+    amende: number;
+    montantTotal: number;
+  } | null;
+}
+
 interface DetailTontine {
   id: string;
   nom: string;
@@ -57,219 +79,426 @@ interface DetailTontine {
   transactions: Transaction[];
 }
 
+function creerColonnesMembres(
+  utilisateurId: string,
+  cycleActuel: number,
+): Column<MembreTontine>[] {
+  return [
+    {
+      key: 'tour',
+      header: 'Tour',
+      render: (m) => <span className="tabular-nums font-semibold">{m.ordrePassage}</span>,
+    },
+    {
+      key: 'membre',
+      header: 'Membre',
+      render: (m) => {
+        const initiales = `${m.user.prenom.charAt(0)}${m.user.nom.charAt(0)}`;
+        return (
+          <div className="flex items-center gap-3">
+            <span
+              className="flex h-touch w-touch shrink-0 items-center justify-center rounded-pill bg-canvas font-display text-body font-semibold text-ink"
+              aria-hidden="true"
+            >
+              {initiales}
+            </span>
+            <span>
+              <span className="font-medium text-ink">
+                {m.user.prenom} {m.user.nom}
+              </span>
+              {m.user.id === utilisateurId && (
+                <span className="ml-2 text-meta font-medium text-muted-canvas">Vous</span>
+              )}
+            </span>
+          </div>
+        );
+      },
+    },
+    {
+      key: 'statut',
+      header: 'Statut',
+      align: 'right',
+      render: (m) => {
+        if (m.statut === 'EXCLU') return <StatutBadge statut="EXCLU" />;
+        if (m.aDejaRecu) {
+          return (
+            <span className="rounded-pill bg-success-surface px-3 py-1 text-meta font-medium text-success">
+              A reçu
+            </span>
+          );
+        }
+        if (m.ordrePassage === cycleActuel) {
+          return (
+            <span className="rounded-pill bg-canvas px-3 py-1 text-meta font-medium text-muted-canvas">
+              Tour en cours
+            </span>
+          );
+        }
+        return (
+          <span className="rounded-pill bg-canvas px-3 py-1 text-meta font-medium text-muted-canvas">
+            À venir
+          </span>
+        );
+      },
+    },
+  ];
+}
+
+const COLONNES_TRANSACTIONS: Column<Transaction>[] = [
+  { key: 'date', header: 'Date', render: (t) => formaterDate(t.createdAt) },
+  {
+    key: 'operation',
+    header: 'Opération',
+    render: (t) => (
+      <div>
+        <p className="font-medium text-ink">{libelleType(t.type)}</p>
+        <p className="text-meta text-muted-canvas">
+          {t.cycleConcerne ? `Tour ${t.cycleConcerne}` : 'Tour non précisé'}
+        </p>
+      </div>
+    ),
+  },
+  {
+    key: 'montant',
+    header: 'Montant',
+    align: 'right',
+    render: (t) => (
+      <span className="tabular-nums font-semibold">{formaterMontant(enNombre(t.montantBrut))}</span>
+    ),
+  },
+  { key: 'statut', header: 'Statut', align: 'right', render: (t) => <StatutBadge statut={t.statut} /> },
+];
+
 export default function TontineDetailPage() {
   const router = useRouter();
   const params = useParams();
   const id = params.id as string;
 
   const [tontine, setTontine] = useState<DetailTontine | null>(null);
+  const [utilisateurId, setUtilisateurId] = useState('');
+  const [resume, setResume] = useState<ResumeTontine | null>(null);
   const [loading, setLoading] = useState(true);
-  const [onglet, setOnglet] = useState<'membres' | 'transactions'>('membres');
+  const [erreur, setErreur] = useState<string | null>(null);
+  const [tentative, setTentative] = useState(0);
+  const [paiementOuvert, setPaiementOuvert] = useState(false);
+  const [paiementEnCours, setPaiementEnCours] = useState(false);
+  const [messageSucces, setMessageSucces] = useState<string | null>(null);
+  const [messageErreurPaiement, setMessageErreurPaiement] = useState<string | null>(null);
 
   useEffect(() => {
-    const user = getCurrentUser();
-    if (!user) {
+    const utilisateur = getCurrentUser<{ id: string }>();
+    if (!utilisateur) {
       router.push('/login');
       return;
     }
-    chargerDetail();
-  }, [id]);
+    setUtilisateurId(utilisateur.id);
+  }, [router]);
 
-  async function chargerDetail() {
-    try {
+  useEffect(() => {
+    let actif = true;
+    async function chargerDetail() {
       setLoading(true);
-      const res = await apiFetch(`/api/member/tontines/${id}`);
-      if (res.status === 401) {
-        router.push('/login');
-        return;
+      setErreur(null);
+      try {
+        const res = await apiFetch(`/api/member/tontines/${id}`);
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          if (actif) {
+            setErreur(
+              `${extraireMessageErreur(payload, 'Impossible de charger cette tontine.')} Réessayez.`,
+            );
+          }
+          return;
+        }
+        const data: DetailTontine = await res.json();
+        if (!actif) return;
+        setTontine({
+          ...data,
+          montantCotisation: enNombre(data.montantCotisation),
+          transactions: (data.transactions ?? []).map((t) => ({
+            ...t,
+            montantBrut: enNombre(t.montantBrut),
+            montantCommission: enNombre(t.montantCommission),
+            montantNet: enNombre(t.montantNet),
+          })),
+        });
+      } catch (err) {
+        console.error(err);
+        if (actif) setErreur('Une erreur est survenue. Réessayez.');
+      } finally {
+        if (actif) setLoading(false);
       }
-      if (!res.ok) throw new Error('Erreur de chargement');
-      const data: DetailTontine = await res.json();
-      setTontine({
-        ...data,
-        montantCotisation: enNombre(data.montantCotisation),
-        transactions: (data.transactions ?? []).map((t) => ({
-          ...t,
-          montantBrut: enNombre(t.montantBrut),
-          montantCommission: enNombre(t.montantCommission),
-          montantNet: enNombre(t.montantNet),
-        })),
+    }
+    chargerDetail();
+    return () => {
+      actif = false;
+    };
+  }, [id, tentative]);
+
+  // Le résumé `/member/tontines` fournit l’état de cotisation et l’arriéré,
+  // absents du détail. Son échec n’empêche pas l’affichage de la tontine.
+  useEffect(() => {
+    let actif = true;
+    async function chargerResume() {
+      try {
+        const res = await apiFetch('/api/member/tontines');
+        if (!res.ok) return;
+        const data: ResumeTontine[] = await res.json();
+        if (!actif) return;
+        const trouve = data.find((t) => t.id === id);
+        setResume(
+          trouve
+            ? {
+                ...trouve,
+                montantCotisation: enNombre(trouve.montantCotisation),
+              }
+            : null,
+        );
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    chargerResume();
+    return () => {
+      actif = false;
+    };
+  }, [id, tentative]);
+
+  async function confirmerPaiement(provider: string) {
+    setMessageErreurPaiement(null);
+    setPaiementEnCours(true);
+    try {
+      const cycleConcerne = resume?.arriere?.cycle;
+      const res = await apiFetch(`/api/member/tontines/${id}/payer`, {
+        method: 'POST',
+        body: JSON.stringify({
+          provider,
+          ...(cycleConcerne ? { cycleConcerne } : {}),
+        }),
       });
-    } catch (err) {
-      console.error(err);
-      alert('Impossible de charger le détail de la tontine.');
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(extraireMessageErreur(payload, 'Le paiement a échoué.'));
+      }
+      setPaiementOuvert(false);
+      setMessageSucces(
+        cycleConcerne
+          ? 'Arriéré réglé. Vous pouvez maintenant payer le tour en cours.'
+          : 'Cotisation payée.',
+      );
+      setTentative((n) => n + 1);
+    } catch (err: any) {
+      setMessageErreurPaiement(err.message || 'Le paiement a échoué. Réessayez.');
     } finally {
-      setLoading(false);
+      setPaiementEnCours(false);
     }
   }
 
-  if (loading) return <div className="p-8 text-center text-gray-500">Chargement...</div>;
-  if (!tontine) return <div className="p-8 text-center text-red-600">Tontine introuvable.</div>;
+  if (loading) {
+    return (
+      <div className="mx-auto max-w-shell px-4 py-10 text-body text-muted-canvas">
+        Chargement de la tontine...
+      </div>
+    );
+  }
 
-  const utilisateur = getCurrentUser<{ id: string }>();
-  const monStatut = tontine.membres.find((m) => m.user.id === utilisateur?.id)?.statut;
+  if (erreur || !tontine) {
+    return (
+      <Card className="mx-auto max-w-content p-6">
+        <h1 className="font-display text-section font-semibold text-ink">
+          {erreur ? 'Détail indisponible' : 'Tontine introuvable'}
+        </h1>
+        <p className="mt-2 text-body text-muted-canvas">
+          {erreur ?? 'Cette tontine est introuvable ou vous n’y avez pas accès.'}
+        </p>
+        <div className="mt-5 flex flex-wrap gap-2">
+          <Button onClick={() => setTentative((n) => n + 1)}>Réessayer</Button>
+          <Link href="/dashboard" className={buttonClasses('secondary')}>
+            Retour aux tontines
+          </Link>
+        </div>
+      </Card>
+    );
+  }
+
+  const colonnesMembres = creerColonnesMembres(utilisateurId, tontine.cycleActuel);
+  const monMembre = tontine.membres.find((m) => m.user.id === utilisateurId);
+  const monTour = monMembre?.ordrePassage;
+  const estExclu = monMembre?.statut === 'EXCLU';
+  const estMonTour = typeof monTour === 'number' && monTour === tontine.cycleActuel;
+  const tours = construireTours(
+    { cycleActuel: tontine.cycleActuel, monTour },
+    tontine.membres,
+  );
+  const libelleJour = tontine.jourCotisation
+    ? LIBELLES_JOURS[tontine.jourCotisation]
+      ? LIBELLES_JOURS[tontine.jourCotisation].charAt(0).toUpperCase() +
+        LIBELLES_JOURS[tontine.jourCotisation].slice(1)
+      : tontine.jourCotisation
+    : 'Non défini';
+
+  const montantACotiser = resume?.montantCotisation ?? tontine.montantCotisation;
+  const amende = resume?.arriere?.amende ?? 0;
+  const totalAPayer = resume?.arriere?.montantTotal ?? montantACotiser;
+  const cycleConcerne = resume?.arriere?.cycle ?? null;
+  const dejaPaye = resume?.statutCotisation === 'PAYE' && !resume.arriere;
+  const peutPayer = !estExclu && !dejaPaye;
 
   return (
-    <div className="max-w-2xl mx-auto px-4 py-6 space-y-6">
-      <button
-        onClick={() => router.push('/dashboard')}
-        className="text-sm text-gray-500 hover:text-gray-700"
+    <div className="mx-auto max-w-shell space-y-6">
+      <Link
+        href="/dashboard"
+        className="inline-flex min-h-touch items-center rounded-pill px-3 text-body font-medium text-muted-canvas hover:bg-surface focus-ring"
       >
-        ← Retour
-      </button>
+        Retour à mes tontines
+      </Link>
 
-      {/* Phase 3 : un membre exclu est prévenu du remboursement à la clôture. */}
-      {monStatut === 'EXCLU' && (
-        <div
-          role="alert"
-          className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700"
-        >
-          <p className="font-semibold">Vous avez été exclu de cette tontine.</p>
-          <p className="mt-1 text-xs">
-            Les cotisations et amendes déjà réglées vous seront remboursées à la clôture de la
-            tontine. Vous ne pouvez plus effectuer de paiement ici.
-          </p>
-        </div>
+      {(messageErreurPaiement || messageSucces) && (
+        <Toast
+          message={(messageErreurPaiement ?? messageSucces) as string}
+          ton={messageErreurPaiement ? 'danger' : 'succes'}
+          onFermer={() => {
+            setMessageErreurPaiement(null);
+            setMessageSucces(null);
+          }}
+        />
       )}
 
-      {/* En-tête */}
-      <div className="rounded-2xl border border-gray-200 shadow-sm p-4 bg-white space-y-3">
-        <div className="flex justify-between items-start">
+      {estExclu && (
+        <Card className="border-danger bg-danger-surface p-5">
+          <h2 className="font-display text-lead font-semibold text-danger">
+            Vous avez été exclu de cette tontine.
+          </h2>
+          <p className="mt-2 text-body text-ink">
+            Les cotisations et amendes déjà réglées vous seront remboursées à la clôture. Vous ne
+            pouvez plus effectuer de paiement ici.
+          </p>
+        </Card>
+      )}
+
+      <Card className="p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className="text-xl font-bold text-gray-900">{tontine.nom}</h1>
+            <h1 className="font-display text-section font-semibold text-ink">{tontine.nom}</h1>
             {tontine.description && (
-              <p className="text-sm text-gray-500 mt-1">{tontine.description}</p>
+              <p className="mt-1 text-body text-muted-canvas">{tontine.description}</p>
             )}
           </div>
-          <span className={`text-xs font-medium px-2 py-1 rounded-full ${
-            tontine.statut === 'ACTIVE' ? 'bg-green-100 text-green-700' :
-            tontine.statut === 'EN_ATTENTE' ? 'bg-yellow-100 text-yellow-700' :
-            'bg-gray-100 text-gray-700'
-          }`}>
-            {tontine.statut}
-          </span>
+          <StatutBadge statut={tontine.statut} />
         </div>
 
-        <div className="grid grid-cols-2 gap-3 text-sm">
+        <dl className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
-            <p className="text-gray-500">Cotisation</p>
-            <p className="font-semibold text-gray-900">
-              {tontine.montantCotisation.toLocaleString('fr-FR')} FCFA
-            </p>
+            <dt className="text-meta text-muted-canvas">Cotisation</dt>
+            <dd className="mt-1 font-display text-lead font-semibold tabular-nums text-ink">
+              {formaterMontant(tontine.montantCotisation)}
+            </dd>
           </div>
           <div>
-            <p className="text-gray-500">Jour de cotisation</p>
-            <p className="font-semibold text-gray-900">
-              {LIBELLES_JOURS[tontine.jourCotisation]?.[0].toUpperCase()}
-              {LIBELLES_JOURS[tontine.jourCotisation]?.slice(1) ?? tontine.jourCotisation}
-            </p>
+            <dt className="text-meta text-muted-canvas">Jour de cotisation</dt>
+            <dd className="mt-1 text-body font-semibold text-ink">{libelleJour}</dd>
           </div>
           <div>
-            <p className="text-gray-500">Cycle actuel</p>
-            <p className="font-semibold text-gray-900">{tontine.cycleActuel}</p>
+            <dt className="text-meta text-muted-canvas">Cycle actuel</dt>
+            <dd className="mt-1 font-display text-lead font-semibold tabular-nums text-ink">
+              {tontine.cycleActuel}
+            </dd>
           </div>
           <div>
-            <p className="text-gray-500">Membres</p>
-            <p className="font-semibold text-gray-900">
+            <dt className="text-meta text-muted-canvas">Membres</dt>
+            <dd className="mt-1 font-display text-lead font-semibold tabular-nums text-ink">
               {tontine.membres.length}/{tontine.nombreMaxMembres}
-            </p>
+            </dd>
           </div>
+        </dl>
+
+        <div className="mt-5 rounded-card border border-line bg-canvas p-4">
+          <p className="text-meta text-muted-canvas">Code d’invitation</p>
+          <p className="mt-1 select-all font-display text-lead font-semibold tracking-wider text-ink">
+            {tontine.codeInvitation}
+          </p>
         </div>
 
-        <div className="bg-gray-50 rounded-lg p-3 text-center">
-          <p className="text-xs text-gray-500">Code d'invitation</p>
-          <p className="text-lg font-mono font-bold text-sky-600">{tontine.codeInvitation}</p>
-        </div>
-      </div>
+        {peutPayer ? (
+          <Button className="mt-5 w-full" onClick={() => setPaiementOuvert(true)}>
+            Payer ma cotisation
+          </Button>
+        ) : (
+          !estExclu && (
+            <p className="mt-5 text-body text-muted-canvas">Aucune cotisation à régler pour ce tour.</p>
+          )
+        )}
+      </Card>
 
-      {/* Onglets */}
-      <div className="flex gap-2">
-        <button
-          onClick={() => setOnglet('membres')}
-          className={`flex-1 rounded-xl py-2 text-sm font-semibold transition ${
-            onglet === 'membres' ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'
-          }`}
-        >
-          Membres ({tontine.membres.length})
-        </button>
-        <button
-          onClick={() => setOnglet('transactions')}
-          className={`flex-1 rounded-xl py-2 text-sm font-semibold transition ${
-            onglet === 'transactions' ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600'
-          }`}
-        >
-          Transactions ({tontine.transactions.length})
-        </button>
-      </div>
-
-      {/* Contenu des onglets */}
-      {onglet === 'membres' && (
-        <div className="space-y-2">
-          {tontine.membres.map((m) => (
-            <div key={m.id} className="rounded-xl border border-gray-200 p-3 bg-white flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-sky-100 flex items-center justify-center text-sky-600 font-bold text-sm">
-                  {m.user.prenom[0]}{m.user.nom[0]}
-                </div>
-                <div>
-                  <p className="font-medium text-gray-900 text-sm">{m.user.prenom} {m.user.nom}</p>
-                  <p className="text-xs text-gray-500">
-                     Tour #{m.ordrePassage} · ordre tiré au sort au démarrage
-                   </p>
-                </div>
-              </div>
-              <div className="text-right">
-                {m.statut === 'EXCLU' ? (
-                  <span className="text-xs font-medium px-2 py-1 rounded-full bg-red-100 text-red-700">
-                    Exclu — remboursé à la clôture
-                  </span>
-                ) : m.aDejaRecu ? (
-                  <span className="text-xs font-medium px-2 py-1 rounded-full bg-green-100 text-green-700">
-                    A reçu
-                  </span>
-                ) : (
-                  <span className="text-xs font-medium px-2 py-1 rounded-full bg-gray-100 text-gray-600">
-                    {m.statut}
-                  </span>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
+      {estMonTour && (
+        <AccentCard className="p-5">
+          <p className="text-meta font-medium text-surface">Vous recevez la cagnotte</p>
+          <p className="mt-2 font-display text-lead font-semibold">
+            C’est votre tour, cycle {tontine.cycleActuel}.
+          </p>
+        </AccentCard>
       )}
 
-      {onglet === 'transactions' && (
-        <div className="space-y-2">
-          {tontine.transactions.length === 0 && (
-            <p className="text-gray-400 text-sm text-center py-4">Aucune transaction pour le moment.</p>
+      <Card className="p-5">
+        <h2 className="font-display text-section font-semibold text-ink">Calendrier des tours</h2>
+        <p className="mt-1 text-body text-muted-canvas">
+          Le tour {tontine.cycleActuel} est en cours. Votre rang est{' '}
+          {typeof monTour === 'number' ? `n° ${monTour}` : 'inconnu'}.
+        </p>
+        <div className="mt-5">
+          {tours.length > 0 ? (
+            <TourCalendar tours={tours} legende={`Calendrier des tours de ${tontine.nom}`} />
+          ) : (
+            <p className="text-body text-muted-canvas">Le calendrier n’est pas encore disponible.</p>
           )}
-          {tontine.transactions.map((t) => (
-            <div key={t.id} className="rounded-xl border border-gray-200 p-3 bg-white">
-              <div className="flex justify-between items-start">
-                <div>
-                  <p className="font-medium text-gray-900 text-sm">{t.type}</p>
-                  <p className="text-xs text-gray-500">
-                    {new Date(t.createdAt).toLocaleDateString('fr-FR')}
-                    {t.cycleConcerne && ` · Cycle ${t.cycleConcerne}`}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="font-semibold text-gray-900 text-sm">
-                    {t.montantBrut.toLocaleString('fr-FR')} FCFA
-                  </p>
-                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                    t.statut === 'REUSSIE' ? 'bg-green-100 text-green-700' :
-                    t.statut === 'EN_ATTENTE' ? 'bg-yellow-100 text-yellow-700' :
-                    'bg-red-100 text-red-700'
-                  }`}>
-                    {t.statut}
-                  </span>
-                </div>
-              </div>
-            </div>
-          ))}
         </div>
-      )}
+      </Card>
+
+      <section className="space-y-3">
+        <h2 className="font-display text-section font-semibold text-ink">
+          Ordre de passage ({tontine.membres.length})
+        </h2>
+        <DataTable
+          columns={colonnesMembres}
+          rows={tontine.membres.slice().sort((a, b) => a.ordrePassage - b.ordrePassage)}
+          getRowKey={(m) => m.id}
+          caption="Membres classés par ordre de passage"
+          vide="Aucun membre inscrit."
+        />
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="font-display text-section font-semibold text-ink">
+          Historique ({tontine.transactions.length})
+        </h2>
+        {tontine.transactions.length === 0 ? (
+          <EmptyState
+            titre="Aucune transaction"
+            description="Les paiements de cette tontine apparaîtront ici."
+          />
+        ) : (
+          <DataTable
+            columns={COLONNES_TRANSACTIONS}
+            rows={tontine.transactions}
+            getRowKey={(t) => t.id}
+            caption="Transactions de la tontine"
+          />
+        )}
+      </section>
+
+      <PaymentModal
+        ouvert={paiementOuvert}
+        onFermer={() => setPaiementOuvert(false)}
+        tontineNom={tontine.nom}
+        montantCotisation={montantACotiser}
+        amende={amende}
+        total={totalAPayer}
+        cycleConcerne={cycleConcerne}
+        enCours={paiementEnCours}
+        onConfirmer={(provider) => {
+          void confirmerPaiement(provider);
+        }}
+      />
     </div>
   );
 }

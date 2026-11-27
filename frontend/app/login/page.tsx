@@ -1,9 +1,12 @@
 'use client';
 
-import { useState, FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { apiFetch, setSession } from '@/lib/api';
+import { apiFetch, extraireMessageErreur, setSession } from '@/lib/api';
+import AuthCard from '@/components/ui/AuthCard';
+import Button from '@/components/ui/Button';
+import Input from '@/components/ui/Input';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -24,7 +27,12 @@ export default function LoginPage() {
       const data = await res.json();
 
       if (!res.ok) {
-        setErreur(data.message ?? 'Identifiants invalides.');
+        setErreur(
+          extraireMessageErreur(
+            data,
+            'Identifiants incorrects. Vérifiez votre email et votre mot de passe.',
+          ),
+        );
         return;
       }
 
@@ -32,60 +40,54 @@ export default function LoginPage() {
       router.push(data.user.role === 'SUPER_ADMIN' ? '/admin/dashboard' : '/dashboard');
     } catch (err) {
       console.error(err);
-      setErreur('Une erreur est survenue. Réessayez.');
+      setErreur('Connexion impossible. Vérifiez votre connexion internet, puis réessayez.');
     } finally {
       setChargement(false);
     }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4">
-      <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-4 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-        <h1 className="text-xl font-bold text-gray-900">Connexion</h1>
-
-        {erreur && (
-          <div className="rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm p-3">{erreur}</div>
-        )}
-
-        <div className="space-y-1">
-          <label className="text-sm text-gray-600">Email</label>
-          <input
-            type="email"
-            required
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm"
-            placeholder="vous@exemple.com"
-          />
-        </div>
-
-        <div className="space-y-1">
-          <label className="text-sm text-gray-600">Mot de passe</label>
-          <input
-            type="password"
-            required
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm"
-            placeholder="••••••••"
-          />
-        </div>
-
-        <button
-          type="submit"
-          disabled={chargement}
-          className="w-full rounded-xl bg-gray-900 text-white py-2.5 text-sm font-semibold disabled:opacity-40"
-        >
-          {chargement ? 'Connexion...' : 'Se connecter'}
-        </button>
-
-        <p className="text-center text-sm text-gray-500">
+    <AuthCard
+      titre="Connexion"
+      description="Retrouvez vos tontines et vos échéances."
+      lien={
+        <>
           Pas encore de compte ?{' '}
-          <Link href="/register" className="text-gray-900 font-medium underline">
+          <Link href="/register" className="rounded-pill font-semibold text-ink underline focus-ring">
             Créer un compte
           </Link>
-        </p>
+        </>
+      }
+    >
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {erreur && (
+          <div role="alert" className="rounded-card border border-danger bg-danger-surface p-4 text-meta text-danger">
+            {erreur}
+          </div>
+        )}
+
+        <Input
+          label="Email"
+          type="email"
+          required
+          autoComplete="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+
+        <Input
+          label="Mot de passe"
+          type="password"
+          required
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+
+        <Button type="submit" disabled={chargement} className="w-full">
+          {chargement ? 'Connexion en cours...' : 'Se connecter'}
+        </Button>
       </form>
-    </div>
+    </AuthCard>
   );
 }

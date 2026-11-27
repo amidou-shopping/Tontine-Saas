@@ -1,13 +1,13 @@
 'use client';
 
 /**
- * SupportButton — bouton flottant d'accès aux contacts support.
- *
- * Visible uniquement pour un utilisateur connecté (contrôle d'affichage ;
- * l'autorisation réelle est assurée par le JwtAuthGuard de l'API). Les liens
- * WhatsApp et le message prérempli sont construits côté serveur.
+ * SupportButton — accès aux contacts support (données fournies par l'API).
+ * `variante="header"` : bouton « Aide » dans l'en-tête, masqué sur téléphone.
+ * `variante="section"` : bouton secondaire « Contacter le support » pour un pied de page.
+ * Aucun bouton flottant permanent.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { X } from 'lucide-react';
 import { apiFetch, extraireMessageErreur, getToken } from '@/lib/api';
 
 interface ContactSupport {
@@ -16,11 +16,12 @@ interface ContactSupport {
   lienWhatsApp: string;
 }
 
-export default function SupportButton() {
+export default function SupportButton({ variante = 'section' }: { variante?: 'header' | 'section' }) {
   const [visible, setVisible] = useState(false);
   const [ouvert, setOuvert] = useState(false);
   const [contacts, setContacts] = useState<ContactSupport[]>([]);
   const [erreur, setErreur] = useState<string | null>(null);
+  const conteneur = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     // État initial identique serveur/client pour éviter une erreur d'hydratation.
@@ -36,8 +37,8 @@ export default function SupportButton() {
         }
         if (actif) setContacts((payload.contacts ?? []) as ContactSupport[]);
       })
-      .catch((err: any) => {
-        if (actif) setErreur(err.message || 'Contacts indisponibles.');
+      .catch((err: Error) => {
+        if (actif) setErreur(`${err.message || 'Contacts indisponibles.'} Réessayez plus tard.`);
       });
 
     return () => {
@@ -45,60 +46,90 @@ export default function SupportButton() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!ouvert) return;
+    function fermerAuClic(event: MouseEvent) {
+      if (conteneur.current && !conteneur.current.contains(event.target as Node)) {
+        setOuvert(false);
+      }
+    }
+    function fermerAvecEchap(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOuvert(false);
+    }
+    document.addEventListener('mousedown', fermerAuClic);
+    document.addEventListener('keydown', fermerAvecEchap);
+    return () => {
+      document.removeEventListener('mousedown', fermerAuClic);
+      document.removeEventListener('keydown', fermerAvecEchap);
+    };
+  }, [ouvert]);
+
   if (!visible) return null;
 
+  const classeDeclencheur =
+    variante === 'header'
+      ? 'hidden min-h-touch items-center rounded-pill border border-line-strong bg-surface px-4 text-body font-semibold text-ink hover:bg-canvas focus-ring lg:inline-flex'
+      : 'inline-flex min-h-control w-full items-center justify-center rounded-pill border border-line-strong bg-surface px-5 text-body font-semibold text-ink hover:bg-canvas focus-ring';
+
   return (
-    <div className="fixed bottom-6 right-6 z-40 flex flex-col items-end gap-2">
+    <div className="relative" ref={conteneur}>
+      <button
+        type="button"
+        onClick={() => setOuvert((etat) => !etat)}
+        aria-expanded={ouvert}
+        className={classeDeclencheur}
+      >
+        {variante === 'header' ? 'Aide' : 'Contacter le support'}
+      </button>
+
       {ouvert && (
-        <div className="w-72 rounded-2xl border border-gray-200 bg-white p-4 shadow-xl space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-bold text-gray-900">Besoin d’aide ?</h2>
+        <div
+          className={`fixed z-floating w-80 max-w-popover rounded-card border border-line bg-surface p-4 shadow-floating ${
+            variante === 'header' ? 'right-4 top-20' : 'bottom-24 right-4 md:bottom-6'
+          }`}
+        >
+          <div className="flex items-start justify-between gap-4">
+            <h2 className="font-display text-section font-semibold text-ink">Besoin d’aide ?</h2>
             <button
+              type="button"
               onClick={() => setOuvert(false)}
-              aria-label="Fermer le support"
-              className="text-gray-400 hover:text-gray-600 text-lg leading-none"
+              aria-label="Fermer les contacts support"
+              className="flex min-h-touch min-w-touch items-center justify-center rounded-pill text-ink hover:bg-canvas focus-ring"
             >
-              ×
+              <X className="h-icon w-icon" aria-hidden="true" />
             </button>
           </div>
 
-          {erreur && <p className="text-xs text-red-600">{erreur}</p>}
-
-          {!erreur && contacts.length === 0 && (
-            <p className="text-xs text-gray-500">Aucun contact support configuré.</p>
+          {erreur && (
+            <p role="alert" className="mt-3 text-meta text-danger">
+              {erreur}
+            </p>
           )}
 
-          {contacts.map((contact) => (
-            <div
-              key={contact.lienWhatsApp}
-              className="rounded-xl border border-gray-100 bg-gray-50 p-3 space-y-2"
-            >
-              <div>
-                <p className="text-sm font-semibold text-gray-900">{contact.nom}</p>
-                <p className="text-xs text-gray-500" dir="ltr">
-                  +{contact.telephone}
+          {!erreur && contacts.length === 0 && (
+            <p className="mt-3 text-body text-muted-canvas">Aucun contact support configuré.</p>
+          )}
+
+          <div className="mt-3 space-y-3">
+            {contacts.map((contact) => (
+              <div key={contact.lienWhatsApp} className="rounded-card border border-line bg-canvas p-3">
+                <p className="text-body font-semibold text-ink">{contact.nom}</p>
+                <p className="text-meta text-muted-canvas" dir="ltr">
+                  {contact.telephone}
                 </p>
+                <a
+                  href={contact.lienWhatsApp}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-3 inline-flex min-h-control w-full items-center justify-center rounded-pill border border-black bg-black px-4 text-body font-semibold text-surface hover:bg-ink focus-ring"
+                >
+                  Écrire sur WhatsApp
+                </a>
               </div>
-              <a
-                href={contact.lienWhatsApp}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block rounded-lg bg-green-600 px-3 py-2 text-center text-xs font-semibold text-white hover:bg-green-700"
-              >
-                Écrire sur WhatsApp
-              </a>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       )}
-
-      <button
-        onClick={() => setOuvert((etat) => !etat)}
-        aria-label="Ouvrir les contacts support"
-        className="rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white shadow-lg hover:bg-sky-700"
-      >
-        {ouvert ? 'Fermer' : 'Aide'}
-      </button>
     </div>
   );
 }

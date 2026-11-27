@@ -1,20 +1,33 @@
 import type { Metadata } from 'next';
+import { Fraunces, Figtree } from 'next/font/google';
 import './globals.css';
-import Navigation from '@/components/Navigation';
-import SupportButton from '@/components/SupportButton';
+import AppShell from '@/components/ui/AppShell';
+
+// Polices auto-hébergées par next/font : aucune requête vers Google au runtime.
+const fraunces = Fraunces({
+  subsets: ['latin', 'latin-ext'],
+  weight: ['500', '600'],
+  variable: '--font-fraunces',
+  display: 'swap',
+});
+
+const figtree = Figtree({
+  subsets: ['latin', 'latin-ext'],
+  weight: ['400', '500', '600'],
+  variable: '--font-figtree',
+  display: 'swap',
+});
 
 export const metadata: Metadata = {
-  title: 'Tontine SaaS',
-  description: 'Gestion moderne et sécurisée de vos tontines sénégalaises.',
+  title: 'Tontine',
+  description: 'Vos tontines, en toute simplicité.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="fr">
+    <html lang="fr" className={`${fraunces.variable} ${figtree.variable}`}>
       <body>
-        <Navigation />
-        {children}
-        <SupportButton />
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );
